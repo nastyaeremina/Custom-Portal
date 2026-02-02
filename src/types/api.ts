@@ -33,6 +33,7 @@ export interface RawOutputs {
   generatedWithDalle: boolean;
   faviconUrl: string | null;
   logoUrl: string | null;
+  dalleImageUrl: string | null;
 }
 
 export interface GenerateResponse {

@@ -48,7 +48,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     let fullLogo: string | null = null;
     let loginImage: string | null = null;
     let socialImage: string | null = null;
-    let generatedWithDalle = false;
+    let dalleImageUrl: string | null = null;
 
     // Process square icon (from favicon)
     if (scrapedData.favicon) {
@@ -68,8 +68,19 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
+    // Always generate a DALL-E image for AI Generations section
+    const companyNameForDalle = cleanCompanyName(scrapedData.title);
+    if (isOpenAIConfigured()) {
+      try {
+        console.log("Generating DALL-E image...");
+        dalleImageUrl = await generateLoginImage(colors, companyNameForDalle);
+      } catch (error) {
+        console.error("Error generating image with DALL-E:", error);
+      }
+    }
+
     // Process login image
-    // First try OG image, then hero images, then generate with DALL-E
+    // First try OG image, then hero images, then use DALL-E generated image
     const loginImageSource = scrapedData.ogImage ||
       scrapedData.images.find(img => img.type === "hero")?.url;
 
@@ -81,24 +92,24 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
-    // If no suitable image found and OpenAI is configured, generate with DALL-E
-    if (!loginImage && isOpenAIConfigured()) {
-      try {
-        console.log("Generating login image with DALL-E...");
-        const companyName = cleanCompanyName(scrapedData.title);
-        loginImage = await generateLoginImage(colors, companyName);
-        generatedWithDalle = true;
-      } catch (error) {
-        console.error("Error generating image with DALL-E:", error);
-      }
+    // If no suitable scraped image found, use DALL-E generated image
+    if (!loginImage && dalleImageUrl) {
+      loginImage = dalleImageUrl;
     }
 
-    // Process social image (from OG image or login image)
+    // Process social image (from OG image or DALL-E)
     if (scrapedData.ogImage) {
       try {
         socialImage = await processSocialImage(scrapedData.ogImage);
       } catch (error) {
         console.error("Error processing social image:", error);
+      }
+    } else if (dalleImageUrl) {
+      // Use DALL-E image as social image if no OG image available
+      try {
+        socialImage = await processSocialImage(dalleImageUrl);
+      } catch (error) {
+        console.error("Error processing DALL-E image for social:", error);
       }
     }
 
@@ -130,9 +141,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       })),
       extractedMeta: scrapedData.meta,
       colorThiefPalette: imageColors,
-      generatedWithDalle,
+      generatedWithDalle: dalleImageUrl !== null,
       faviconUrl: scrapedData.favicon,
       logoUrl: scrapedData.logo,
+      dalleImageUrl,
     };
 
     return NextResponse.json({
