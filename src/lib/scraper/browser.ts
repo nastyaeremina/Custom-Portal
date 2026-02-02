@@ -1,7 +1,11 @@
 import puppeteer, { Browser, Page } from "puppeteer-core";
-import chromium from "@sparticuz/chromium";
+import chromium from "@sparticuz/chromium-min";
 
 let browserInstance: Browser | null = null;
+
+// Remote Chromium binary for serverless environments
+const CHROMIUM_REMOTE_URL =
+  "https://github.com/Sparticuz/chromium/releases/download/v131.0.1/chromium-v131.0.1-pack.tar";
 
 export async function getBrowser(): Promise<Browser> {
   if (!browserInstance || !browserInstance.connected) {
@@ -9,11 +13,11 @@ export async function getBrowser(): Promise<Browser> {
     const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
 
     if (isServerless) {
-      // Use @sparticuz/chromium for serverless
+      // Use @sparticuz/chromium-min for serverless with remote binary
       browserInstance = await puppeteer.launch({
         args: chromium.args,
         defaultViewport: { width: 1920, height: 1080 },
-        executablePath: await chromium.executablePath(),
+        executablePath: await chromium.executablePath(CHROMIUM_REMOTE_URL),
         headless: true,
       });
     } else {
