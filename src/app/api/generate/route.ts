@@ -4,14 +4,14 @@ import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
 import { cleanCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
-import { generateColorScheme } from "@/lib/colors/generator";
+import { generateColorScheme, selectAccentColor, selectSidebarColors } from "@/lib/colors/generator";
 import {
   processSquareIcon,
   processFullLogo,
   processLoginImage,
   processSocialImage,
 } from "@/lib/images/processor";
-import { generateLoginImage, isOpenAIConfigured } from "@/lib/images/dalle";
+import { isOpenAIConfigured, generateGradientImagePublic, extractColorsFromScrapedImages } from "@/lib/images/dalle";
 
 export const maxDuration = 60; // Allow up to 60 seconds
 
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     console.log(`Scraping ${targetUrl}...`);
     const scrapedData = await scrapeWebsite(targetUrl);
 
-    // 4. Extract colors from favicon/logo if available
+    // 4. Extract colors from favicon/logo for palette (used for debug display)
     let imageColors: string[] = [];
     const colorSource = scrapedData.favicon || scrapedData.logo;
     if (colorSource) {
@@ -40,10 +40,27 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
-    // 5. Generate color scheme
-    const colors = generateColorScheme(scrapedData.colors, imageColors);
+    // 5. Select accent color using priority logic:
+    //    favicon -> logo -> link/button colors -> null
+    const accentResult = await selectAccentColor({
+      squareIconUrl: scrapedData.favicon,
+      logoUrl: scrapedData.logo,
+      linkButtonColors: scrapedData.linkButtonColors,
+    });
 
-    // 6. Process images
+    // 6. Generate color scheme using nav/header background and accent
+    const colors = generateColorScheme(
+      scrapedData.navHeaderBackground,
+      accentResult.color
+    );
+
+    // Get sidebar source for debug info
+    const sidebarResult = selectSidebarColors({
+      navHeaderBackground: scrapedData.navHeaderBackground,
+      accentColor: accentResult.color,
+    });
+
+    // 7. Process images
     let squareIcon: string | null = null;
     let fullLogo: string | null = null;
     let loginImage: string | null = null;
@@ -68,36 +85,31 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
-    // Always generate a DALL-E image for AI Generations section
-    const companyNameForDalle = cleanCompanyName(scrapedData.title);
+    // Generate gradient image for login (approach 3)
+    const scrapedImagesInfo = scrapedData.images.map(img => ({
+      url: img.url,
+      width: img.width,
+      height: img.height,
+      type: img.type,
+    }));
+
     if (isOpenAIConfigured()) {
       try {
-        console.log("Generating DALL-E image...");
-        dalleImageUrl = await generateLoginImage(colors, companyNameForDalle);
+        console.log("Generating gradient image...");
+        // Extract colors from scraped images for gradient
+        const gradientColors = await extractColorsFromScrapedImages(scrapedImagesInfo);
+        const finalColors = gradientColors.length > 0
+          ? gradientColors
+          : [colors.accent, colors.sidebarBackground];
+        dalleImageUrl = await generateGradientImagePublic(finalColors);
+        // Always use gradient for login image
+        loginImage = dalleImageUrl;
       } catch (error) {
-        console.error("Error generating image with DALL-E:", error);
+        console.error("Error generating gradient image:", error);
       }
     }
 
-    // Process login image
-    // First try OG image, then hero images, then use DALL-E generated image
-    const loginImageSource = scrapedData.ogImage ||
-      scrapedData.images.find(img => img.type === "hero")?.url;
-
-    if (loginImageSource) {
-      try {
-        loginImage = await processLoginImage(loginImageSource);
-      } catch (error) {
-        console.error("Error processing login image:", error);
-      }
-    }
-
-    // If no suitable scraped image found, use DALL-E generated image
-    if (!loginImage && dalleImageUrl) {
-      loginImage = dalleImageUrl;
-    }
-
-    // Process social image (from OG image or DALL-E)
+    // Process social image (prefer scraped OG image, otherwise use gradient)
     if (scrapedData.ogImage) {
       try {
         socialImage = await processSocialImage(scrapedData.ogImage);
@@ -105,22 +117,22 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         console.error("Error processing social image:", error);
       }
     } else if (dalleImageUrl) {
-      // Use DALL-E image as social image if no OG image available
+      // Use gradient image as social image if no OG image available
       try {
         socialImage = await processSocialImage(dalleImageUrl);
       } catch (error) {
-        console.error("Error processing DALL-E image for social:", error);
+        console.error("Error processing gradient image for social:", error);
       }
     }
 
-    // 7. Clean company name
+    // 8. Clean company name
     const companyName = cleanCompanyName(
       scrapedData.meta["og:site_name"] ||
       scrapedData.meta["og:title"] ||
       scrapedData.title
     );
 
-    // 8. Build response
+    // 9. Build response
     const portalData: PortalData = {
       companyName,
       colors,
@@ -133,11 +145,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     };
 
     const rawOutputs: RawOutputs = {
-      scrapedColors: scrapedData.colors,
+      scrapedColors: scrapedData.colorsWithUsage,
       scrapedImages: scrapedData.images.map(img => ({
         url: img.url,
         width: img.width,
         height: img.height,
+        type: img.type,
       })),
       extractedMeta: scrapedData.meta,
       colorThiefPalette: imageColors,
@@ -145,6 +158,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       faviconUrl: scrapedData.favicon,
       logoUrl: scrapedData.logo,
       dalleImageUrl,
+      accentColorSource: accentResult.source,
+      accentColorConfidence: accentResult.isHighConfidence ? "high" : "low",
+      navHeaderBackground: scrapedData.navHeaderBackground,
+      sidebarColorSource: sidebarResult.source,
     };
 
     return NextResponse.json({

@@ -409,9 +409,20 @@ export async function extractHeroImages(page: Page): Promise<ScrapedImage[]> {
   }));
 }
 
+export interface ColorWithUsage {
+  color: string;
+  count: number;
+  sources: string[];
+}
+
 export async function extractColors(page: Page): Promise<string[]> {
+  const result = await extractColorsWithUsage(page);
+  return result.map(c => c.color);
+}
+
+export async function extractColorsWithUsage(page: Page): Promise<ColorWithUsage[]> {
   const colors = await page.evaluate(() => {
-    const colorSet = new Set<string>();
+    const colorMap = new Map<string, { count: number; sources: Set<string> }>();
 
     // Helper to convert rgb to hex
     const rgbToHex = (rgb: string): string | null => {
@@ -425,23 +436,42 @@ export async function extractColors(page: Page): Promise<string[]> {
       return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
     };
 
+    // Helper to normalize hex
+    const normalizeHex = (hex: string): string => {
+      if (hex.length === 4) {
+        return `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`.toLowerCase();
+      }
+      return hex.toLowerCase();
+    };
+
+    // Helper to add color with source
+    const addColor = (hex: string, source: string) => {
+      const normalized = normalizeHex(hex);
+      if (!colorMap.has(normalized)) {
+        colorMap.set(normalized, { count: 0, sources: new Set() });
+      }
+      const entry = colorMap.get(normalized)!;
+      entry.count++;
+      entry.sources.add(source);
+    };
+
     // Get computed styles from key elements
     const selectors = [
-      "body",
-      "header",
-      "nav",
-      "main",
-      "footer",
-      "h1",
-      "h2",
-      "a",
-      "button",
-      '[class*="btn"]',
-      '[class*="primary"]',
-      '[class*="brand"]',
+      { selector: "body", source: "body" },
+      { selector: "header", source: "header" },
+      { selector: "nav", source: "nav" },
+      { selector: "main", source: "main" },
+      { selector: "footer", source: "footer" },
+      { selector: "h1", source: "headings" },
+      { selector: "h2", source: "headings" },
+      { selector: "a", source: "links" },
+      { selector: "button", source: "buttons" },
+      { selector: '[class*="btn"]', source: "buttons" },
+      { selector: '[class*="primary"]', source: "primary" },
+      { selector: '[class*="brand"]', source: "brand" },
     ];
 
-    selectors.forEach((selector) => {
+    selectors.forEach(({ selector, source }) => {
       const elements = document.querySelectorAll(selector);
       elements.forEach((el) => {
         if (!el) return;
@@ -456,7 +486,7 @@ export async function extractColors(page: Page): Promise<string[]> {
             !value.includes("initial")
           ) {
             const hex = rgbToHex(value);
-            if (hex) colorSet.add(hex);
+            if (hex) addColor(hex, source);
           }
         });
       });
@@ -470,13 +500,7 @@ export async function extractColors(page: Page): Promise<string[]> {
           // Extract hex colors
           const hexMatches = text.match(/#[0-9a-fA-F]{3,6}(?![0-9a-fA-F])/g);
           hexMatches?.forEach((c) => {
-            // Normalize to 6-digit hex
-            if (c.length === 4) {
-              const expanded = `#${c[1]}${c[1]}${c[2]}${c[2]}${c[3]}${c[3]}`;
-              colorSet.add(expanded.toLowerCase());
-            } else {
-              colorSet.add(c.toLowerCase());
-            }
+            addColor(c, "stylesheet");
           });
         });
       } catch {
@@ -484,10 +508,159 @@ export async function extractColors(page: Page): Promise<string[]> {
       }
     });
 
-    return Array.from(colorSet);
+    // Convert to array format for return
+    return Array.from(colorMap.entries()).map(([color, data]) => ({
+      color,
+      count: data.count,
+      sources: Array.from(data.sources),
+    }));
+  });
+
+  // Sort by count (most used first)
+  return colors.sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Extract colors specifically from links and buttons for accent fallback
+ * Returns colors sorted by frequency (most common first)
+ */
+export async function extractLinkButtonColors(page: Page): Promise<string[]> {
+  const colors = await page.evaluate(() => {
+    const colorCounts = new Map<string, number>();
+
+    // Helper to convert rgb to hex
+    const rgbToHex = (rgb: string): string | null => {
+      const match = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!match) return null;
+      const r = parseInt(match[1]);
+      const g = parseInt(match[2]);
+      const b = parseInt(match[3]);
+      return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+    };
+
+    // Helper to normalize hex
+    const normalizeHex = (hex: string): string => {
+      if (hex.length === 4) {
+        return `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`.toLowerCase();
+      }
+      return hex.toLowerCase();
+    };
+
+    // Helper to add color with count
+    const addColor = (hex: string) => {
+      const normalized = normalizeHex(hex);
+      colorCounts.set(normalized, (colorCounts.get(normalized) || 0) + 1);
+    };
+
+    // Get colors from links
+    document.querySelectorAll("a").forEach((el) => {
+      const styles = window.getComputedStyle(el);
+      const color = styles.getPropertyValue("color");
+      const bgColor = styles.getPropertyValue("background-color");
+
+      if (color && color !== "rgba(0, 0, 0, 0)" && color !== "transparent") {
+        const hex = rgbToHex(color);
+        if (hex) addColor(hex);
+      }
+      if (bgColor && bgColor !== "rgba(0, 0, 0, 0)" && bgColor !== "transparent") {
+        const hex = rgbToHex(bgColor);
+        if (hex) addColor(hex);
+      }
+    });
+
+    // Get colors from buttons
+    document.querySelectorAll('button, [class*="btn"], [role="button"]').forEach((el) => {
+      const styles = window.getComputedStyle(el);
+      const color = styles.getPropertyValue("color");
+      const bgColor = styles.getPropertyValue("background-color");
+
+      if (color && color !== "rgba(0, 0, 0, 0)" && color !== "transparent") {
+        const hex = rgbToHex(color);
+        if (hex) addColor(hex);
+      }
+      if (bgColor && bgColor !== "rgba(0, 0, 0, 0)" && bgColor !== "transparent") {
+        const hex = rgbToHex(bgColor);
+        if (hex) addColor(hex);
+      }
+    });
+
+    // Convert to array sorted by frequency
+    return Array.from(colorCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([color]) => color);
   });
 
   return colors;
+}
+
+/**
+ * Extract the nav/header background color for sidebar selection
+ * Returns the background color of nav or header element
+ */
+export async function extractNavHeaderBackground(page: Page): Promise<string | null> {
+  const bgColor = await page.evaluate(() => {
+    // Helper to convert rgb to hex
+    const rgbToHex = (rgb: string): string | null => {
+      const match = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!match) return null;
+      const r = parseInt(match[1]);
+      const g = parseInt(match[2]);
+      const b = parseInt(match[3]);
+      return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+    };
+
+    // Helper to check if color is transparent or not set
+    const isTransparent = (color: string): boolean => {
+      return !color ||
+        color === "rgba(0, 0, 0, 0)" ||
+        color === "transparent" ||
+        color.includes("initial");
+    };
+
+    // Try nav first
+    const nav = document.querySelector("nav");
+    if (nav) {
+      const styles = window.getComputedStyle(nav);
+      const bgColor = styles.getPropertyValue("background-color");
+      if (!isTransparent(bgColor)) {
+        return rgbToHex(bgColor);
+      }
+
+      // Check first div child inside nav
+      const firstDiv = nav.querySelector("div");
+      if (firstDiv) {
+        const divStyles = window.getComputedStyle(firstDiv);
+        const divBg = divStyles.getPropertyValue("background-color");
+        if (!isTransparent(divBg)) {
+          return rgbToHex(divBg);
+        }
+      }
+    }
+
+    // Try header
+    const header = document.querySelector("header");
+    if (header) {
+      const styles = window.getComputedStyle(header);
+      const bgColor = styles.getPropertyValue("background-color");
+      if (!isTransparent(bgColor)) {
+        return rgbToHex(bgColor);
+      }
+
+      // Check first div child inside header
+      const firstDiv = header.querySelector("div");
+      if (firstDiv) {
+        const divStyles = window.getComputedStyle(firstDiv);
+        const divBg = divStyles.getPropertyValue("background-color");
+        if (!isTransparent(divBg)) {
+          return rgbToHex(divBg);
+        }
+      }
+    }
+
+    return null;
+  });
+
+  return bgColor;
 }
 
 export async function extractMetadata(

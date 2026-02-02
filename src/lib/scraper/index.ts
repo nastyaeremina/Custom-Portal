@@ -4,7 +4,9 @@ import {
   extractLogo,
   extractOgImage,
   extractHeroImages,
-  extractColors,
+  extractColorsWithUsage,
+  extractLinkButtonColors,
+  extractNavHeaderBackground,
   extractMetadata,
 } from "./extractors";
 import { ScrapedData } from "./types";
@@ -15,12 +17,14 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
 
   try {
     // Run extractions in parallel where possible
-    const [favicon, logo, ogImage, heroImages, colors, metadata] = await Promise.all([
+    const [favicon, logo, ogImage, heroImages, colorsWithUsage, linkButtonColors, navHeaderBackground, metadata] = await Promise.all([
       extractFavicon(page).catch(() => null),
       extractLogo(page).catch(() => null),
       extractOgImage(page).catch(() => null),
       extractHeroImages(page).catch(() => []),
-      extractColors(page).catch(() => []),
+      extractColorsWithUsage(page).catch(() => []),
+      extractLinkButtonColors(page).catch(() => []),
+      extractNavHeaderBackground(page).catch(() => null),
       extractMetadata(page).catch(() => ({
         title: null,
         description: null,
@@ -44,7 +48,10 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
       logo,
       ogImage,
       images: allImages,
-      colors,
+      colors: colorsWithUsage.map(c => c.color),
+      colorsWithUsage,
+      linkButtonColors,
+      navHeaderBackground,
       meta: metadata.meta,
     };
   } finally {
