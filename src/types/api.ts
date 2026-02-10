@@ -14,9 +14,18 @@ export interface PortalColors {
 
 export interface PortalImages {
   squareIcon: string | null;
+  /** Dominant background color of the squareIcon (hex, e.g. "#2c2c3e").
+   *  Used to fill the message-avatar container so the logo blends seamlessly. */
+  squareIconBg: string | null;
   fullLogo: string | null;
   loginImage: string | null;
+  /** Dashboard hero banner image (gradient generated from brand colors). */
+  dashboardImage: string | null;
   socialImage: string | null;
+  /** Raw favicon URL from scraper (unprocessed passthrough for fallback) */
+  rawFaviconUrl: string | null;
+  /** Raw logo URL from scraper (unprocessed passthrough for fallback) */
+  rawLogoUrl: string | null;
 }
 
 export interface PortalData {
@@ -53,6 +62,44 @@ export interface RawOutputs {
   accentColorConfidence?: "high" | "low";
   navHeaderBackground?: string | null;
   sidebarColorSource?: "navHeader" | "accent" | "default";
+  qualityGateResult?: {
+    passed: boolean;
+    checks: Record<string, { passed: boolean; detail: string }>;
+    adjustments: string[];
+    iterations: number;
+    originalColors: { sidebarBackground: string; sidebarText: string; accent: string };
+  };
+  accentPromotion?: boolean;
+  /** Discipline detection debug snapshot */
+  disciplineDetection?: {
+    discipline: string;
+    confidence: number;
+    signals: string[];
+    heroSelection: {
+      selected: boolean;
+      imageUrl: string | null;
+      reason: string;
+      availableCount: number;
+      chosenIndex: number;
+    };
+    /** Which source provided the login image: "library" | "gradient" | "static" */
+    loginImageSource: string;
+  };
+  /** Gradient generation debug snapshot */
+  gradientDebug?: {
+    /** "extracted" = brand colors used, "preset" = curated fallback palette */
+    mode: "extracted" | "preset";
+    /** CSS angle in degrees (e.g. 168) */
+    angle: number;
+    /** Final hex stops used in the gradient */
+    stops: string[];
+    /** Why this mode was chosen */
+    reason: string;
+    /** Preset name if mode=preset */
+    presetName?: string;
+    /** Original input colors before guardrails */
+    inputColors?: string[];
+  };
 }
 
 export interface GenerateResponse {

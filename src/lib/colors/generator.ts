@@ -1,9 +1,15 @@
 import chroma from "chroma-js";
-import { PortalColorScheme } from "./types";
+import {
+  PortalColorScheme,
+  ColorGenerationContext,
+  ValidatedColorScheme,
+  ExtendedAccentResult,
+} from "./types";
 import {
   extractAccentFromImageUrl,
   isNeutralColor,
 } from "./extractor";
+import { validateAndFixColorScheme } from "./quality-gate";
 
 // Default fallback colors
 const DEFAULT_COLORS: PortalColorScheme = {
@@ -22,6 +28,13 @@ export interface AccentColorResult {
   color: string | null;
   source: "squareIcon" | "logo" | "linkButton" | "none";
   isHighConfidence: boolean;
+}
+
+/** Extended output from selectAccentColorWithContext */
+export interface AccentSelectionOutput {
+  result: AccentColorResult;
+  faviconSaturation: number | null;
+  logoSaturation: number | null;
 }
 
 export interface SidebarColorSource {
@@ -78,8 +91,21 @@ export function selectSidebarColors(sources: SidebarColorSource): SidebarColorRe
       sidebarBackground = sources.navHeaderBackground;
       source = "navHeader";
     } else {
-      // Light/minimal nav (L > 186) → use accent color
-      if (sources.accentColor) {
+      // Light nav (L > 186) — check if it has real color (non-neutral)
+      // New rule: "If nav/header color is LIGHT but non-neutral, KEEP it"
+      const navSaturation = (() => {
+        try {
+          const [, s] = chroma(sources.navHeaderBackground).hsl();
+          return isNaN(s) ? 0 : s;
+        } catch { return 0; }
+      })();
+
+      if (navSaturation >= 0.12) {
+        // Light but colorful nav → keep it as sidebar (e.g. a light brand blue)
+        sidebarBackground = sources.navHeaderBackground;
+        source = "navHeader";
+      } else if (sources.accentColor) {
+        // Light AND neutral nav → fall back to accent
         sidebarBackground = sources.accentColor;
         source = "accent";
       } else {
@@ -130,7 +156,7 @@ export async function selectAccentColor(
     const iconColor = await extractAccentFromImageUrl(sources.squareIconUrl);
     if (iconColor) {
       console.log(`[selectAccentColor] Icon color found: ${iconColor.color}, saturation: ${iconColor.saturation.toFixed(2)}`);
-      if (iconColor.saturation >= 0.1) {
+      if (iconColor.saturation >= 0.12) {
         console.log("[selectAccentColor] ✓ Using color from square icon");
         return {
           color: iconColor.color,
@@ -151,7 +177,7 @@ export async function selectAccentColor(
     const logoColor = await extractAccentFromImageUrl(sources.logoUrl);
     if (logoColor) {
       console.log(`[selectAccentColor] Logo color found: ${logoColor.color}, saturation: ${logoColor.saturation.toFixed(2)}`);
-      if (logoColor.saturation >= 0.1) {
+      if (logoColor.saturation >= 0.12) {
         console.log("[selectAccentColor] ✓ Using color from logo");
         return {
           color: logoColor.color,
@@ -205,6 +231,94 @@ export async function selectAccentColor(
 }
 
 /**
+ * Select accent color WITH context - always extracts both favicon and logo saturation
+ * for use by the quality gate. Returns the accent result plus saturation metadata.
+ */
+export async function selectAccentColorWithContext(
+  sources: AccentColorSource
+): Promise<AccentSelectionOutput> {
+  console.log("[selectAccentColorWithContext] Starting accent color selection with context");
+
+  let faviconSaturation: number | null = null;
+  let logoSaturation: number | null = null;
+  let selectedResult: AccentColorResult | null = null;
+
+  // Step 1: Always try to extract favicon color
+  if (sources.squareIconUrl) {
+    console.log("[selectAccentColorWithContext] Extracting favicon color...");
+    const iconColor = await extractAccentFromImageUrl(sources.squareIconUrl);
+    if (iconColor) {
+      faviconSaturation = iconColor.saturation;
+      console.log(`[selectAccentColorWithContext] Favicon saturation: ${iconColor.saturation.toFixed(2)}`);
+      if (iconColor.saturation >= 0.12 && !selectedResult) {
+        selectedResult = {
+          color: iconColor.color,
+          source: "squareIcon",
+          isHighConfidence: iconColor.isHighConfidence,
+        };
+      }
+    }
+  }
+
+  // Step 2: Always try to extract logo color (even if favicon was selected)
+  if (sources.logoUrl) {
+    console.log("[selectAccentColorWithContext] Extracting logo color...");
+    const logoColor = await extractAccentFromImageUrl(sources.logoUrl);
+    if (logoColor) {
+      logoSaturation = logoColor.saturation;
+      console.log(`[selectAccentColorWithContext] Logo saturation: ${logoColor.saturation.toFixed(2)}`);
+      if (logoColor.saturation >= 0.12 && !selectedResult) {
+        selectedResult = {
+          color: logoColor.color,
+          source: "logo",
+          isHighConfidence: logoColor.isHighConfidence,
+        };
+      }
+    }
+  }
+
+  // Step 3: Try link/button colors if no accent selected yet
+  if (!selectedResult && sources.linkButtonColors && sources.linkButtonColors.length > 0) {
+    const validColors = sources.linkButtonColors.filter(c => !isNeutralColor(c));
+    if (validColors.length > 0) {
+      const topColor = validColors[0];
+      try {
+        const [, s] = chroma(topColor).hsl();
+        const saturation = isNaN(s) ? 0 : s;
+        selectedResult = {
+          color: topColor,
+          source: "linkButton",
+          isHighConfidence: saturation > 0.3,
+        };
+      } catch {
+        selectedResult = {
+          color: topColor,
+          source: "linkButton",
+          isHighConfidence: false,
+        };
+      }
+    }
+  }
+
+  // Step 4: No color found
+  if (!selectedResult) {
+    selectedResult = {
+      color: null,
+      source: "none",
+      isHighConfidence: false,
+    };
+  }
+
+  console.log(`[selectAccentColorWithContext] Result: ${selectedResult.color || "none"} (source: ${selectedResult.source}, confidence: ${selectedResult.isHighConfidence ? "high" : "low"})`);
+
+  return {
+    result: selectedResult,
+    faviconSaturation,
+    logoSaturation,
+  };
+}
+
+/**
  * Generate a portal color scheme
  * Uses new sidebar color logic based on nav/header background
  */
@@ -226,4 +340,57 @@ export function generateColorScheme(
     sidebarText: sidebarResult.sidebarText,
     accent,
   };
+}
+
+/**
+ * Generate a validated color scheme with quality gate enforcement.
+ * Wraps generateColorScheme with the 12-rule quality gate.
+ */
+export function generateValidatedColorScheme(
+  navHeaderBackground: string | null,
+  accentResult: AccentColorResult,
+  context: {
+    faviconSaturation: number | null;
+    logoSaturation: number | null;
+    linkButtonColors: string[];
+    allExtractedColors: string[];
+  }
+): ValidatedColorScheme {
+  // Step 1: Generate naive colors (existing logic)
+  const naiveColors = generateColorScheme(navHeaderBackground, accentResult.color);
+
+  // Step 2: Compute accent saturation for context
+  let accentSaturation = 0;
+  if (accentResult.color) {
+    try {
+      const [, s] = chroma(accentResult.color).hsl();
+      accentSaturation = isNaN(s) ? 0 : s;
+    } catch {
+      accentSaturation = 0;
+    }
+  }
+
+  // Step 3: Build context for quality gate
+  const extendedAccent: ExtendedAccentResult = {
+    color: accentResult.color,
+    source: accentResult.source,
+    isHighConfidence: accentResult.isHighConfidence,
+    saturation: accentSaturation,
+  };
+
+  const gateContext: ColorGenerationContext = {
+    accentResult: extendedAccent,
+    navHeaderBackground,
+    logoSaturation: context.logoSaturation,
+    faviconSaturation: context.faviconSaturation,
+    linkButtonColors: context.linkButtonColors,
+    allExtractedColors: context.allExtractedColors,
+  };
+
+  // Step 4: Validate and fix
+  console.log("[generateValidatedColorScheme] Running quality gate...");
+  const validated = validateAndFixColorScheme(naiveColors, gateContext);
+  console.log(`[generateValidatedColorScheme] Quality gate passed: ${validated.qualityGate.passed}, iterations: ${validated.qualityGate.iterations}`);
+
+  return validated;
 }

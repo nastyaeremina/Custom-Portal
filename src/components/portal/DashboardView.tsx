@@ -1,50 +1,162 @@
 "use client";
 
-import { PortalColors } from "@/types/api";
+import type { PreviewBranding, PreviewTheme } from "@/types/preview";
 import { Sidebar } from "./Sidebar";
-import { Skeleton } from "@/components/ui/Skeleton";
 
 interface DashboardViewProps {
-  companyName: string;
-  logoUrl: string | null;
-  colors: PortalColors;
+  branding: PreviewBranding;
+  theme: PreviewTheme;
+  dashboardHeroImageUrl: string | null;
 }
 
+/* ─── Right-arrow icon for "View all" links (from Figma Icon (approved).svg) ─── */
+function ArrowRightIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
+      <path
+        d="M7.59046 4.39184C7.66594 4.31957 7.70931 4.21838 7.70931 4.11238C7.70931 4.00639 7.66594 3.90681 7.59046 3.83293L4.76379 1.13475C4.60961 0.986993 4.36549 0.993417 4.21934 1.1476C4.07319 1.30178 4.07801 1.5459 4.23219 1.69205L6.36182 3.72693H0.899614C0.686009 3.72693 0.51416 3.89878 0.51416 4.11238C0.51416 4.32599 0.686009 4.49784 0.899614 4.49784H6.36182L4.23058 6.53111C4.0764 6.67887 4.07158 6.92138 4.21773 7.07557C4.36389 7.22975 4.60801 7.23457 4.76219 7.08841L7.58885 4.39023L7.59046 4.39184Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/* ─── Action card icons (from /public/assets/icons/) ─── */
+
+/* invoice.svg — document with $ sign */
+function InvoiceIcon() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 20 20" fill="none">
+      <path
+        d="M8.875 1.875H4.5C4.15625 1.875 3.875 2.15625 3.875 2.5V17.5C3.875 17.8438 4.15625 18.125 4.5 18.125H14.5C14.8438 18.125 15.125 17.8438 15.125 17.5V8.125H11.6875C10.1328 8.125 8.875 6.86719 8.875 5.3125V1.875ZM14.3477 6.25L10.75 2.65234V5.3125C10.75 5.83203 11.168 6.25 11.6875 6.25H14.3477ZM2 2.5C2 1.12109 3.12109 0 4.5 0H9.71484C10.3789 0 11.0156 0.261719 11.4844 0.730469L16.2695 5.51953C16.7383 5.98828 17 6.625 17 7.28906V17.5C17 18.8789 15.8789 20 14.5 20H4.5C3.12109 20 2 18.8789 2 17.5V2.5ZM5.125 4.0625C5.125 3.54297 5.54297 3.125 6.0625 3.125H6.6875C7.20703 3.125 7.625 3.54297 7.625 4.0625C7.625 4.58203 7.20703 5 6.6875 5H6.0625C5.54297 5 5.125 4.58203 5.125 4.0625ZM5.125 7.1875C5.125 6.66797 5.54297 6.25 6.0625 6.25H6.6875C7.20703 6.25 7.625 6.66797 7.625 7.1875C7.625 7.70703 7.20703 8.125 6.6875 8.125H6.0625C5.54297 8.125 5.125 7.70703 5.125 7.1875ZM9.65625 9.0625C10.0859 9.0625 10.4375 9.41406 10.4375 9.84375V10H10.75C11.1797 10 11.5312 10.3516 11.5312 10.7812C11.5312 11.2109 11.1797 11.5625 10.75 11.5625H9.05469C8.87109 11.5625 8.71875 11.7109 8.71875 11.8984C8.71875 12.0586 8.83203 12.1953 8.98828 12.2266L10.3203 12.4922C11.207 12.668 11.8438 13.4492 11.8438 14.3516C11.8438 15.2305 11.2461 15.9687 10.4375 16.1836V16.4023C10.4375 16.832 10.0859 17.1836 9.65625 17.1836C9.22656 17.1836 8.875 16.832 8.875 16.4023V16.2461H8.25C7.82031 16.2461 7.46875 15.8945 7.46875 15.4648C7.46875 15.0352 7.82031 14.6836 8.25 14.6836H9.94531C10.1289 14.6836 10.2812 14.5352 10.2812 14.3477C10.2812 14.1875 10.168 14.0508 10.0117 14.0195L8.67969 13.7578C7.79297 13.582 7.15625 12.8008 7.15625 11.8984C7.15625 10.9102 7.91016 10.0977 8.875 10.0078V9.84375C8.875 9.41406 9.22656 9.0625 9.65625 9.0625Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/* Signature / accessibility figure — matches sidebar Contracts icon */
+function ContractIcon() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
+      <path
+        d="M2.08738 2.27724C2.08738 1.96295 2.34238 1.70796 2.65667 1.70796C2.97096 1.70796 3.22596 1.96295 3.22596 2.27724V2.37094C3.22596 2.69709 3.19868 3.02325 3.14294 3.34466L1.8739 3.73723C1.43626 3.87243 1.13857 4.27686 1.13857 4.73466V5.12368H0.284643C0.126903 5.12368 0 5.25058 0 5.40832C0 5.56606 0.126903 5.69296 0.284643 5.69296H1.14213C1.17771 6.11756 1.5347 6.45201 1.96878 6.45201C2.26054 6.45201 2.53095 6.29902 2.68039 6.04877L2.86897 5.73566C3.22003 5.14977 3.47502 4.51051 3.62327 3.84397L3.63513 3.78823L4.94923 3.38142L4.66578 4.17368C4.63494 4.26144 4.64799 4.35751 4.70136 4.43342C4.75473 4.50932 4.84131 4.55439 4.93382 4.55439H6.54679C6.70453 4.55439 6.83144 4.42749 6.83144 4.26975C6.83144 4.11201 6.70453 3.9851 6.54679 3.9851H5.33825L5.67626 3.03748C5.71303 2.93548 5.68812 2.82281 5.6134 2.74453C5.53868 2.66626 5.4272 2.63779 5.32401 2.66982L3.74662 3.15845C3.77864 2.89753 3.79524 2.63423 3.79524 2.37094V2.27724C3.79524 1.64866 3.28526 1.13867 2.65667 1.13867C2.02808 1.13867 1.5181 1.64866 1.5181 2.27724V2.75165C1.5181 2.90939 1.645 3.03629 1.80274 3.03629C1.96048 3.03629 2.08738 2.90939 2.08738 2.75165V2.27724ZM2.04231 4.28161L3.0018 3.9851C2.86304 4.49746 2.65311 4.98729 2.38033 5.4439L2.19175 5.75701C2.14431 5.83528 2.06011 5.88391 1.96878 5.88391C1.82527 5.88391 1.70786 5.76768 1.70786 5.62299V4.73585C1.70786 4.5283 1.84306 4.34447 2.04231 4.28279V4.28161ZM3.54499 5.69296H7.30584C7.46358 5.69296 7.59049 5.56606 7.59049 5.40832C7.59049 5.25058 7.46358 5.12368 7.30584 5.12368H3.81303C3.73238 5.317 3.64343 5.50676 3.54499 5.69296Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/* Icon (approved)-1.svg — checklist with checkmarks */
+function TaskIcon() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 11 11" fill="none">
+      <g clipPath="url(#clip_task)">
+        <path
+          d="M3.04016 1.42514C3.21608 1.22945 3.20027 0.93097 3.00458 0.755045C2.80889 0.579119 2.51041 0.594933 2.33448 0.790625L1.2473 1.99838L0.810454 1.56153C0.624645 1.3777 0.324189 1.3777 0.13838 1.56153C-0.0474287 1.74537 -0.0474287 2.0478 0.13838 2.23163L0.929056 3.02231C1.02196 3.11521 1.14649 3.16463 1.27695 3.16068C1.40741 3.15672 1.52997 3.10137 1.61694 3.00452L3.04016 1.42317V1.42514ZM3.04016 4.58784C3.21608 4.39215 3.20027 4.09367 3.00458 3.91775C2.80889 3.74182 2.51041 3.75764 2.33448 3.95333L1.2473 5.16108L0.810454 4.72424C0.624645 4.53843 0.324189 4.53843 0.140357 4.72424C-0.0434754 4.91005 -0.0454521 5.2105 0.140357 5.39433L0.931032 6.18501C1.02394 6.27791 1.14847 6.32733 1.27893 6.32338C1.40939 6.31942 1.53195 6.26408 1.61892 6.16722L3.04214 4.58587L3.04016 4.58784ZM4.26966 2.37198H9.64625C9.90915 2.37198 10.1207 2.16047 10.1207 1.89757C10.1207 1.63467 9.90915 1.42317 9.64625 1.42317L4.26966 1.42317C4.00676 1.42317 3.79525 1.63467 3.79525 1.89757C3.79525 2.16047 4.00676 2.37198 4.26966 2.37198ZM3.79525 5.06027C3.79525 5.32317 4.00676 5.53468 4.26966 5.53468H9.64625C9.90915 5.53468 10.1207 5.32317 10.1207 5.06027C10.1207 4.79737 9.90915 4.58587 9.64625 4.58587L4.26966 4.58587C4.00676 4.58587 3.79525 4.79737 3.79525 5.06027ZM3.16271 8.22298C3.16271 8.48588 3.37422 8.69738 3.63712 8.69738H9.64625C9.90915 8.69738 10.1207 8.48588 10.1207 8.22298C10.1207 7.96008 9.90915 7.74857 9.64625 7.74857H3.63712C3.37422 7.74857 3.16271 7.96008 3.16271 8.22298ZM1.89763 8.22298C1.89763 8.05522 1.83099 7.89433 1.71237 7.7757C1.59374 7.65708 1.43285 7.59044 1.26509 7.59044C1.09733 7.59044 0.936443 7.65708 0.817819 7.7757C0.699195 7.89433 0.632552 8.05522 0.632552 8.22298C0.632552 8.39074 0.699195 8.55162 0.817819 8.67025C0.936443 8.78887 1.09733 8.85552 1.26509 8.85552C1.43285 8.85552 1.59374 8.78887 1.71237 8.67025C1.83099 8.55162 1.89763 8.39074 1.89763 8.22298Z"
+          fill="currentColor"
+        />
+      </g>
+      <defs>
+        <clipPath id="clip_task">
+          <rect width="10.1206" height="10.1206" fill="white" />
+        </clipPath>
+      </defs>
+    </svg>
+  );
+}
+
+const ACTION_CARDS = [
+  { icon: InvoiceIcon, label: "Invoices", count: "1 invoice" },
+  { icon: ContractIcon, label: "Contracts", count: "1 contract" },
+  { icon: TaskIcon, label: "Tasks", count: "1 task" },
+];
+
 export function DashboardView({
-  companyName,
-  logoUrl,
-  colors,
+  branding,
+  theme,
+  dashboardHeroImageUrl,
 }: DashboardViewProps) {
   return (
-    <div className="flex h-full rounded-xl overflow-hidden">
-      <Sidebar
-        companyName={companyName}
-        logoUrl={logoUrl}
-        backgroundColor={colors.sidebarBackground}
-        textColor={colors.sidebarText}
-      />
+    <div
+      className="flex h-full rounded-l-[6px] overflow-hidden bg-white"
+      style={{ fontFamily: "var(--font-portal)" }}
+    >
+      <Sidebar branding={branding} theme={theme} activeItem="home" />
 
-      {/* Main Content */}
-      <div className="flex-1 bg-white p-6 rounded-r-xl">
-        {/* Search Bar */}
-        <div className="mb-6">
-          <div className="flex items-center gap-2 px-3 py-2 bg-white rounded-md border border-neutral-200 max-w-md">
-            <svg className="w-4 h-4 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            <span className="text-sm text-neutral-400">Search...</span>
-          </div>
+      {/* ─── Main content ─── */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top bar */}
+        <div
+          className="flex items-center px-4 py-2 border-b border-neutral-200"
+          style={{ minHeight: "36px" }}
+        >
+          <span className="text-[10px] font-medium" style={{ color: "#212B36" }}>
+            Home
+          </span>
         </div>
 
-        {/* Welcome Section */}
-        <div>
-          <h1 className="text-xl font-semibold text-neutral-900 mb-4">Welcome</h1>
+        {/* Content area */}
+        <div className="flex-1 p-4 overflow-hidden">
+          {/* Greeting */}
+          <h2 className="text-[15px] font-medium mb-1" style={{ color: "#212B36" }}>
+            Good morning, Ana
+          </h2>
+          <p className="text-[9px] mb-4" style={{ color: "#6B7280" }}>
+            Here&apos;s what needs your attention today
+          </p>
 
-          {/* Skeleton content to match the mockup */}
-          <div className="space-y-2.5 max-w-sm">
-            <Skeleton className="h-3.5 w-full" />
-            <Skeleton className="h-3.5 w-[85%]" />
-            <Skeleton className="h-3.5 w-[70%]" />
+          {/* Hero image zone — full-bleed across content area */}
+          <div className="-mr-4 h-[150px] rounded-l-[5px] bg-neutral-100 mb-5 overflow-hidden">
+            {dashboardHeroImageUrl ? (
+              <img
+                src={dashboardHeroImageUrl}
+                alt="Dashboard hero"
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-neutral-100 to-neutral-200" />
+            )}
+          </div>
+
+          {/* Your actions */}
+          <div className="-mr-4 rounded-l-[5px] border border-neutral-200 border-r-0 bg-neutral-50 p-3">
+            <h3 className="text-[13px] font-medium mb-0.5" style={{ color: "#212B36" }}>
+              Your actions
+            </h3>
+            <p className="text-[9px] mb-3" style={{ color: "#6B7280" }}>
+              You have 4 pending items
+            </p>
+
+            {/* Action cards row */}
+            <div className="flex gap-2">
+              {ACTION_CARDS.map((card) => {
+                const CardIcon = card.icon;
+                return (
+                  <div
+                    key={card.label}
+                    className="flex-1 flex flex-col gap-[8px] p-[13px] rounded-[5px] border border-neutral-200 bg-white"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-[6px]">
+                        <span style={{ color: "#212B36" }}>
+                          <CardIcon />
+                        </span>
+                        <span className="text-[10px] font-medium" style={{ color: "#212B36" }}>
+                          {card.label}
+                        </span>
+                      </div>
+                      <span className="text-neutral-400">
+                        <ArrowRightIcon />
+                      </span>
+                    </div>
+                    <p className="text-[9px]" style={{ color: "#6B7280" }}>
+                      {card.count}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>

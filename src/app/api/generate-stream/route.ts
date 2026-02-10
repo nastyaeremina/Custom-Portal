@@ -4,9 +4,10 @@ import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
 import { cleanCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
-import { generateColorScheme, selectAccentColor, selectSidebarColors } from "@/lib/colors/generator";
+import { generateValidatedColorScheme, selectAccentColorWithContext, selectSidebarColors } from "@/lib/colors/generator";
 import {
   processSquareIcon,
+  extractSquareIconBg,
   processFullLogo,
   processLoginImage,
   processSocialImage,
@@ -21,7 +22,10 @@ import {
   LogoCenteredInput,
   generateGradientImagePublic,
   extractColorsFromScrapedImages,
+  computeGradientDebug,
+  type GradientDebug,
 } from "@/lib/images/dalle";
+import { detectDiscipline, selectHeroImage } from "@/lib/discipline";
 
 export const maxDuration = 120; // Allow up to 120 seconds for multiple DALL-E generations
 
@@ -69,19 +73,39 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // 4. Select accent color using priority logic:
-        //    favicon -> logo -> link/button colors -> null
-        const accentResult = await selectAccentColor({
+        // 4. Select accent color WITH context (extracts both favicon and logo saturation)
+        const accentSelection = await selectAccentColorWithContext({
           squareIconUrl: scrapedData.favicon,
           logoUrl: scrapedData.logo,
           linkButtonColors: scrapedData.linkButtonColors,
         });
 
-        // 5. Generate color scheme using nav/header background and accent
-        const colors = generateColorScheme(
+        const accentResult = accentSelection.result;
+
+        // 5. Build extracted colors list for quality gate context
+        const allExtractedColors = [
+          ...scrapedData.colors,
+          ...(scrapedData.linkButtonColors || []),
+        ];
+
+        // 6. Generate VALIDATED color scheme with quality gate
+        const validatedColors = generateValidatedColorScheme(
           scrapedData.navHeaderBackground,
-          accentResult.color
+          accentResult,
+          {
+            faviconSaturation: accentSelection.faviconSaturation,
+            logoSaturation: accentSelection.logoSaturation,
+            linkButtonColors: scrapedData.linkButtonColors || [],
+            allExtractedColors,
+          }
         );
+
+        // Extract the final colors for use
+        const colors = {
+          sidebarBackground: validatedColors.sidebarBackground,
+          sidebarText: validatedColors.sidebarText,
+          accent: validatedColors.accent,
+        };
 
         // Get sidebar source for debug info
         const sidebarResult = selectSidebarColors({
@@ -89,11 +113,29 @@ export async function POST(request: NextRequest) {
           accentColor: accentResult.color,
         });
 
-        // 6. Clean company name
+        // 7. Clean company name
         const companyName = cleanCompanyName(
           scrapedData.meta["og:site_name"] ||
           scrapedData.meta["og:title"] ||
           scrapedData.title
+        );
+
+        // ── Discipline detection ──────────────────────────────────────
+        const disciplineResult = detectDiscipline({
+          url: targetUrl,
+          title: scrapedData.title,
+          description: scrapedData.description,
+          meta: scrapedData.meta,
+        });
+
+        const heroSelection = selectHeroImage(disciplineResult, targetUrl);
+
+        // Console debug snapshot
+        console.log(
+          `[discipline] ${targetUrl} → ${disciplineResult.discipline} ` +
+          `(confidence: ${disciplineResult.confidence}, signals: [${disciplineResult.signals.join(", ")}]) ` +
+          `→ hero: ${heroSelection.selected ? heroSelection.imageUrl : "SKIP → gradient fallback"} ` +
+          `(${heroSelection.reason})`
         );
 
         // Prepare scraped images info for DALL-E prompts
@@ -112,12 +154,10 @@ export async function POST(request: NextRequest) {
         };
 
         // Initialize DALL-E generations with prompts but no images yet
-        // Note: For logo_centered and gradient, we use placeholder prompts since
-        // the actual prompts depend on extracted colors which happen during generation
         const initialDalleGenerations: DalleGeneration[] = [
           {
             approach: "logo_centered",
-            prompt: getLogoCenteredPrompt(colors.sidebarBackground), // Placeholder, will be updated
+            prompt: getLogoCenteredPrompt(colors.sidebarBackground),
             imageUrl: null,
             status: "pending",
           },
@@ -129,7 +169,7 @@ export async function POST(request: NextRequest) {
           },
           {
             approach: "gradient",
-            prompt: getGradientPrompt([colors.accent, colors.sidebarBackground]), // Placeholder
+            prompt: getGradientPrompt([colors.accent, colors.sidebarBackground]),
             imageUrl: null,
             status: "pending",
           },
@@ -145,7 +185,14 @@ export async function POST(request: NextRequest) {
           });
         }
 
+        // Login image: discipline library takes priority, gradient is fallback.
+        // Computed early so all SSE events can include it (prevents flash).
+        let loginImage: string | null = heroSelection.selected ? heroSelection.imageUrl : null;
+        let loginImageSource: string = heroSelection.selected ? "library" : "gradient";
+
         // Send colors and basic data event
+        // Include loginImage early — discipline hero selection is already done,
+        // so the client can render the login card without a flash/fallback swap.
         controller.enqueue(encoder.encode(createSSEMessage({
           type: "colors",
           message: "Colors extracted",
@@ -154,9 +201,13 @@ export async function POST(request: NextRequest) {
             colors,
             images: {
               squareIcon: null,
+              squareIconBg: null,
               fullLogo: null,
-              loginImage: null,
+              loginImage,
+              dashboardImage: null,
               socialImage: null,
+              rawFaviconUrl: scrapedData.favicon,
+              rawLogoUrl: scrapedData.logo,
             },
           },
           rawOutputs: {
@@ -173,21 +224,32 @@ export async function POST(request: NextRequest) {
             accentColorConfidence: accentResult.isHighConfidence ? "high" : "low",
             navHeaderBackground: scrapedData.navHeaderBackground,
             sidebarColorSource: sidebarResult.source,
+            qualityGateResult: {
+              passed: validatedColors.qualityGate.passed,
+              checks: validatedColors.qualityGate.checks,
+              adjustments: validatedColors.qualityGate.adjustments,
+              iterations: validatedColors.qualityGate.iterations,
+              originalColors: validatedColors.qualityGate.originalColors,
+            },
+            accentPromotion: validatedColors.accentPromotion,
           },
         })));
 
-        // 7. Process images progressively
+        // 8. Process images progressively
         let squareIcon: string | null = null;
+        let squareIconBg: string | null = null;
         let fullLogo: string | null = null;
-        let loginImage: string | null = null;
         let socialImage: string | null = null;
         let dalleImageUrl: string | null = null;
         let dalleGenerations: DalleGeneration[] = initialDalleGenerations;
 
-        // Process square icon
+        // Process square icon + extract its dominant background
         if (scrapedData.favicon) {
           try {
             squareIcon = await processSquareIcon(scrapedData.favicon);
+            if (squareIcon) {
+              squareIconBg = await extractSquareIconBg(squareIcon);
+            }
           } catch (error) {
             console.error("Error processing square icon:", error);
           }
@@ -211,9 +273,13 @@ export async function POST(request: NextRequest) {
             colors,
             images: {
               squareIcon,
+              squareIconBg,
               fullLogo,
-              loginImage: null,
+              loginImage,
+              dashboardImage: null,
               socialImage: null,
+              rawFaviconUrl: scrapedData.favicon,
+              rawLogoUrl: scrapedData.logo,
             },
           },
         })));
@@ -238,13 +304,22 @@ export async function POST(request: NextRequest) {
               colors,
               images: {
                 squareIcon,
+                squareIconBg,
                 fullLogo,
-                loginImage: null,
+                loginImage,
+                dashboardImage: null,
                 socialImage: scrapedSocialImage,
+                rawFaviconUrl: scrapedData.favicon,
+                rawLogoUrl: scrapedData.logo,
               },
             },
           })));
         }
+
+        // Extract domain for deterministic gradient hashing
+        let domain = "unknown";
+        try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+        let gradientDebugInfo: GradientDebug | undefined;
 
         // Generate all image approaches (deterministic, no AI)
         if (isOpenAIConfigured()) {
@@ -273,8 +348,11 @@ export async function POST(request: NextRequest) {
 
             if (gradientGeneration?.imageUrl) {
               dalleImageUrl = gradientGeneration.imageUrl;
-              // Always use gradient (approach 3) for login image
-              loginImage = gradientGeneration.imageUrl;
+              // Use gradient for login only if discipline library didn't provide one
+              if (!loginImage) {
+                loginImage = gradientGeneration.imageUrl;
+                loginImageSource = "gradient";
+              }
             }
 
             // For social image: use scraped OG image if available, otherwise use gradient
@@ -287,6 +365,20 @@ export async function POST(request: NextRequest) {
                 console.error("Error processing gradient image for social:", error);
               }
             }
+
+            // Compute gradient debug info (lightweight, synchronous)
+            // Use the same color inputs that generateAllDalleImages used internally
+            const gradientColorsForDebug = await extractColorsFromScrapedImages(scrapedImagesInfo);
+            const finalGradientColorsForDebug = gradientColorsForDebug.length > 0
+              ? gradientColorsForDebug
+              : [colors.accent, colors.sidebarBackground];
+            gradientDebugInfo = computeGradientDebug(finalGradientColorsForDebug, domain);
+
+            console.log(
+              `[gradient] ${domain} → mode: ${gradientDebugInfo.mode}, ` +
+              `angle: ${gradientDebugInfo.angle}°, stops: [${gradientDebugInfo.stops.join(", ")}] ` +
+              `(${gradientDebugInfo.reason})`
+            );
 
             // Send update with generations
             controller.enqueue(encoder.encode(createSSEMessage({
@@ -314,9 +406,13 @@ export async function POST(request: NextRequest) {
           colors,
           images: {
             squareIcon,
+            squareIconBg,
             fullLogo,
             loginImage,
+            dashboardImage: dalleImageUrl,
             socialImage,
+            rawFaviconUrl: scrapedData.favicon,
+            rawLogoUrl: scrapedData.logo,
           },
         };
 
@@ -334,6 +430,28 @@ export async function POST(request: NextRequest) {
           accentColorConfidence: accentResult.isHighConfidence ? "high" : "low",
           navHeaderBackground: scrapedData.navHeaderBackground,
           sidebarColorSource: sidebarResult.source,
+          qualityGateResult: {
+            passed: validatedColors.qualityGate.passed,
+            checks: validatedColors.qualityGate.checks,
+            adjustments: validatedColors.qualityGate.adjustments,
+            iterations: validatedColors.qualityGate.iterations,
+            originalColors: validatedColors.qualityGate.originalColors,
+          },
+          accentPromotion: validatedColors.accentPromotion,
+          disciplineDetection: {
+            discipline: disciplineResult.discipline,
+            confidence: disciplineResult.confidence,
+            signals: disciplineResult.signals,
+            heroSelection: {
+              selected: heroSelection.selected,
+              imageUrl: heroSelection.imageUrl,
+              reason: heroSelection.reason,
+              availableCount: heroSelection.availableCount,
+              chosenIndex: heroSelection.chosenIndex,
+            },
+            loginImageSource,
+          },
+          gradientDebug: gradientDebugInfo,
         };
 
         controller.enqueue(encoder.encode(createSSEMessage({

@@ -480,57 +480,322 @@ async function generateOgExtendedImage(ogImageUrl: string): Promise<string> {
   }
 }
 
+// ── Gradient debug type ──────────────────────────────────────────────
+export interface GradientDebug {
+  mode: "extracted" | "preset";
+  angle: number;
+  stops: string[];
+  reason: string;
+  presetName?: string;
+  inputColors?: string[];
+}
+
+// ── Color helpers ────────────────────────────────────────────────────
+
+/** { r, g, b } → "#rrggbb" */
+function rgbToHex(r: number, g: number, b: number): string {
+  return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+
+/** RGB → HSL (h: 0–360, s: 0–1, l: 0–1) */
+function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return { h: h * 360, s, l };
+}
+
+/** HSL → RGB (h: 0–360, s: 0–1, l: 0–1) → (0–255 each) */
+function hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
+  h /= 360;
+  if (s === 0) {
+    const v = Math.round(l * 255);
+    return { r: v, g: v, b: v };
+  }
+  const hue2rgb = (p: number, q: number, t: number) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r: Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
+    g: Math.round(hue2rgb(p, q, h) * 255),
+    b: Math.round(hue2rgb(p, q, h - 1 / 3) * 255),
+  };
+}
+
+/** Perceived luminance (0–1), used to sort stops light→dark */
+function luminance(hex: string): number {
+  const { r, g, b } = hexToRgb(hex);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
+/** Euclidean distance in RGB space (0–441) */
+function colorDistance(a: string, b: string): number {
+  const ca = hexToRgb(a), cb = hexToRgb(b);
+  return Math.sqrt((ca.r - cb.r) ** 2 + (ca.g - cb.g) ** 2 + (ca.b - cb.b) ** 2);
+}
+
 /**
- * Approach 3: Gradient from extracted colors
+ * Clamp saturation: cap at maxS, boost lightness if too dark.
+ * Returns a new hex color.
  */
-async function generateGradientImage(colors: string[]): Promise<string> {
-  // Ensure we have at least 2 colors
-  const colorList = colors.length >= 2 ? colors : [colors[0] || "#6366f1", colors[0] || "#8b5cf6"];
+function clampColor(hex: string, maxS = 0.75, minL = 0.25, maxL = 0.80): string {
+  const { r, g, b } = hexToRgb(hex);
+  const hsl = rgbToHsl(r, g, b);
+  const s = Math.min(hsl.s, maxS);
+  const l = Math.max(minL, Math.min(maxL, hsl.l));
+  const clamped = hslToRgb(hsl.h, s, l);
+  return rgbToHex(clamped.r, clamped.g, clamped.b);
+}
 
-  // Take up to 4 colors for the gradient
-  const gradientColors = colorList.slice(0, 4);
+/**
+ * Deduplicate colors that are visually very close (distance < 40).
+ * Keeps the first occurrence.
+ */
+function deduplicateColors(colors: string[]): string[] {
+  const result: string[] = [];
+  for (const c of colors) {
+    if (!result.some(existing => colorDistance(existing, c) < 40)) {
+      result.push(c);
+    }
+  }
+  return result;
+}
 
-  // Create gradient stops
-  const stops = gradientColors.map((color, index) => {
-    const percentage = (index / (gradientColors.length - 1)) * 100;
-    return `<stop offset="${percentage}%" style="stop-color:${color};stop-opacity:1" />`;
-  }).join("\n");
+// ── Curated preset palettes ──────────────────────────────────────────
 
-  // Create SVG with multi-color gradient
-  const svg = `
-    <svg width="1160" height="1160" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="mainGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-          ${stops}
-        </linearGradient>
-        <linearGradient id="overlayGrad" x1="100%" y1="0%" x2="0%" y2="100%">
-          ${stops}
-        </linearGradient>
-        <radialGradient id="radialOverlay" cx="30%" cy="30%" r="70%">
-          <stop offset="0%" style="stop-color:${gradientColors[0]};stop-opacity:0.3" />
-          <stop offset="100%" style="stop-color:${gradientColors[gradientColors.length - 1]};stop-opacity:0" />
-        </radialGradient>
-      </defs>
+interface GradientPreset {
+  name: string;
+  stops: string[];
+}
 
-      <!-- Base diagonal gradient -->
-      <rect width="1160" height="1160" fill="url(#mainGrad)"/>
+const GRADIENT_PRESETS: GradientPreset[] = [
+  { name: "sunset",        stops: ["#fbc2eb", "#f68084", "#a6475b"] },
+  { name: "soft-blue",     stops: ["#e0f0ff", "#7fb3e0", "#3a6fa0"] },
+  { name: "navy-depth",    stops: ["#c3cfe2", "#5b7fad", "#1a3260"] },
+  { name: "lilac",         stops: ["#e8d5f5", "#b48ad8", "#6c3a8a"] },
+  { name: "sage",          stops: ["#e8f0e4", "#8ab89a", "#3a6b4a"] },
+  { name: "warm-sand",     stops: ["#fef3e2", "#e0b87a", "#8a6d3b"] },
+  { name: "coral-rose",    stops: ["#fde2e4", "#e8878c", "#8a3a3d"] },
+  { name: "arctic",        stops: ["#e4f1f8", "#7ec8e3", "#2d6f8e"] },
+  { name: "slate",         stops: ["#ebedf0", "#8e99a4", "#3d4852"] },
+  { name: "peach",         stops: ["#ffecd2", "#fcb69f", "#a8604a"] },
+  { name: "mint",          stops: ["#d4f8e8", "#6cc9a1", "#2d7a56"] },
+  { name: "lavender-mist", stops: ["#f0e6ff", "#c4a8e8", "#6a4a8a"] },
+];
 
-      <!-- Overlay for depth -->
-      <rect width="1160" height="1160" fill="url(#radialOverlay)"/>
+/**
+ * Simple deterministic hash (djb2) for preset selection.
+ * Must match the hash in hero-selector for consistency.
+ */
+function stableHash(str: string): number {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
 
-      <!-- Subtle color blobs for organic feel -->
-      <ellipse cx="300" cy="300" rx="400" ry="300" fill="${gradientColors[0]}" opacity="0.15"/>
-      <ellipse cx="900" cy="800" rx="350" ry="400" fill="${gradientColors[gradientColors.length - 1]}" opacity="0.15"/>
-      ${gradientColors.length > 2 ? `<ellipse cx="600" cy="600" rx="300" ry="300" fill="${gradientColors[1]}" opacity="0.1"/>` : ""}
-    </svg>
-  `;
+// ── Gradient angle from domain hash ──────────────────────────────────
+
+/**
+ * Pick a slight-diagonal angle between 165° and 195° (mostly vertical,
+ * slight lean left or right) based on the domain hash.
+ */
+function pickAngle(domainHash: number): number {
+  // 165–195 in integer steps
+  return 165 + (domainHash % 31); // 0..30 → 165..195
+}
+
+// ── Color guardrails ─────────────────────────────────────────────────
+
+interface NormalizedStops {
+  stops: string[];
+  usedPreset: boolean;
+  presetName?: string;
+  reason: string;
+}
+
+/**
+ * Normalize input colors into 2–4 gradient stops.
+ * - Dedup near-identical colors
+ * - Clamp saturation/lightness
+ * - Sort by luminance (lighter → darker for top-to-bottom feel)
+ * - Fall back to preset if colors are unusable
+ */
+function normalizeStops(
+  inputColors: string[],
+  domainHash: number
+): NormalizedStops {
+  // Step 1: Clean input
+  const cleaned = inputColors
+    .filter(c => /^#[0-9a-fA-F]{6}$/.test(c))
+    .map(c => c.toLowerCase());
+
+  if (cleaned.length === 0) {
+    const preset = GRADIENT_PRESETS[domainHash % GRADIENT_PRESETS.length];
+    return {
+      stops: preset.stops,
+      usedPreset: true,
+      presetName: preset.name,
+      reason: "no valid hex colors in input",
+    };
+  }
+
+  // Step 2: Clamp saturation & lightness
+  const clamped = cleaned.map(c => clampColor(c));
+
+  // Step 3: Deduplicate similar colors
+  const deduped = deduplicateColors(clamped);
+
+  if (deduped.length < 2) {
+    // Only one unique color after dedup — check if it's usable
+    const lum = luminance(deduped[0]);
+    if (lum < 0.15 || lum > 0.92) {
+      // Too dark or too light to make a gradient
+      const preset = GRADIENT_PRESETS[domainHash % GRADIENT_PRESETS.length];
+      return {
+        stops: preset.stops,
+        usedPreset: true,
+        presetName: preset.name,
+        reason: `single color after dedup (${deduped[0]}) is too ${lum < 0.15 ? "dark" : "light"}`,
+      };
+    }
+    // Make a 2-stop gradient from the single color: lighter version → original
+    const { r, g, b } = hexToRgb(deduped[0]);
+    const hsl = rgbToHsl(r, g, b);
+    const lighterL = Math.min(0.90, hsl.l + 0.25);
+    const lighter = hslToRgb(hsl.h, hsl.s * 0.6, lighterL);
+    return {
+      stops: [rgbToHex(lighter.r, lighter.g, lighter.b), deduped[0]],
+      usedPreset: false,
+      reason: "single color expanded to lighter→darker",
+    };
+  }
+
+  // Step 4: Take up to 4 stops, sort by luminance (lighter first → darker bottom)
+  const final = deduped.slice(0, 4);
+  final.sort((a, b) => luminance(b) - luminance(a));
+
+  // Step 5: Check spread — if all colors are too close in luminance, use preset
+  const lumRange = luminance(final[0]) - luminance(final[final.length - 1]);
+  if (lumRange < 0.08) {
+    const preset = GRADIENT_PRESETS[domainHash % GRADIENT_PRESETS.length];
+    return {
+      stops: preset.stops,
+      usedPreset: true,
+      presetName: preset.name,
+      reason: `luminance range too narrow (${lumRange.toFixed(3)}), colors too similar`,
+    };
+  }
+
+  return {
+    stops: final,
+    usedPreset: false,
+    reason: `${final.length} stops from extracted colors, lum range ${lumRange.toFixed(2)}`,
+  };
+}
+
+// ── SVG gradient builder ─────────────────────────────────────────────
+
+/**
+ * Convert CSS angle (deg, 0=up, clockwise) to SVG linearGradient
+ * x1/y1/x2/y2 percentages.
+ */
+function angleToSvgCoords(angleDeg: number): { x1: string; y1: string; x2: string; y2: string } {
+  const rad = ((angleDeg - 90) * Math.PI) / 180; // SVG 0° = right, CSS 0° = up
+  const x1 = Math.round(50 - Math.cos(rad) * 50);
+  const y1 = Math.round(50 - Math.sin(rad) * 50);
+  const x2 = Math.round(50 + Math.cos(rad) * 50);
+  const y2 = Math.round(50 + Math.sin(rad) * 50);
+  return {
+    x1: `${x1}%`,
+    y1: `${y1}%`,
+    x2: `${x2}%`,
+    y2: `${y2}%`,
+  };
+}
+
+/**
+ * Approach 3: Premium gradient from extracted colors.
+ *
+ * Style: smooth vertical/slight-diagonal fade, sorted by luminance
+ * (lighter at top → darker at bottom). One very subtle radial glow
+ * for depth. No blobs.
+ *
+ * Returns { imageUrl, debug } so callers can log/expose debug info.
+ */
+async function generateGradientImage(
+  colors: string[],
+  domain?: string
+): Promise<{ imageUrl: string; debug: GradientDebug }> {
+  const domainStr = domain || "unknown";
+  const domainHash = stableHash(domainStr);
+
+  // ── Normalize stops with guardrails ──
+  const normalized = normalizeStops(colors, domainHash);
+  const { stops } = normalized;
+
+  // ── Pick angle (165–195°, mostly vertical with slight lean) ──
+  const angle = pickAngle(domainHash);
+  const coords = angleToSvgCoords(angle);
+
+  // ── Build SVG stops ──
+  const svgStops = stops
+    .map((color, i) => {
+      const pct = stops.length === 1 ? 0 : (i / (stops.length - 1)) * 100;
+      return `<stop offset="${pct}%" stop-color="${color}" />`;
+    })
+    .join("\n          ");
+
+  // Subtle radial glow: centered upper-third, uses the lightest stop
+  const glowColor = stops[0]; // lightest (sorted lighter-first)
+
+  const svg = `<svg width="1160" height="1160" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" ${Object.entries(coords).map(([k, v]) => `${k}="${v}"`).join(" ")}>
+      ${svgStops}
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="28%" r="55%">
+      <stop offset="0%" stop-color="${glowColor}" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="${glowColor}" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect width="1160" height="1160" fill="url(#g)" />
+  <rect width="1160" height="1160" fill="url(#glow)" />
+</svg>`;
 
   const result = await sharp(Buffer.from(svg))
     .resize(1160, 1160)
     .png()
     .toBuffer();
 
-  return `data:image/png;base64,${result.toString("base64")}`;
+  const debug: GradientDebug = {
+    mode: normalized.usedPreset ? "preset" : "extracted",
+    angle,
+    stops,
+    reason: normalized.reason,
+    ...(normalized.presetName && { presetName: normalized.presetName }),
+    ...(normalized.usedPreset && { inputColors: colors }),
+  };
+
+  return {
+    imageUrl: `data:image/png;base64,${result.toString("base64")}`,
+    debug,
+  };
 }
 
 /**
@@ -594,10 +859,41 @@ export function getOgExtendedPrompt(): string {
 }
 
 /**
- * Generate the gradient image (exported for use as login/social image)
+ * Generate the gradient image (exported for use as login/social image).
+ * Returns both the image URL and debug info for SSE/console output.
+ *
+ * @param domain - Optional domain string for deterministic hash-based
+ *                 angle and preset selection.
  */
-export async function generateGradientImagePublic(colors: string[]): Promise<string> {
-  return generateGradientImage(colors);
+export async function generateGradientImagePublic(
+  colors: string[],
+  domain?: string
+): Promise<{ imageUrl: string; debug: GradientDebug }> {
+  return generateGradientImage(colors, domain);
+}
+
+/**
+ * Compute gradient debug info without generating the image.
+ * Pure & synchronous — used by the streaming route to get debug
+ * metadata without running Sharp again.
+ */
+export function computeGradientDebug(
+  colors: string[],
+  domain?: string
+): GradientDebug {
+  const domainStr = domain || "unknown";
+  const domainHash = stableHash(domainStr);
+  const normalized = normalizeStops(colors, domainHash);
+  const angle = pickAngle(domainHash);
+
+  return {
+    mode: normalized.usedPreset ? "preset" : "extracted",
+    angle,
+    stops: normalized.stops,
+    reason: normalized.reason,
+    ...(normalized.presetName && { presetName: normalized.presetName }),
+    ...(normalized.usedPreset && { inputColors: colors }),
+  };
 }
 
 /**
@@ -682,8 +978,8 @@ export async function generateAllDalleImages(
     })(),
     (async () => {
       try {
-        const imageUrl = await generateGradientImage(finalGradientColors);
-        return { ...generations[2], imageUrl, status: "complete" as const };
+        const result = await generateGradientImage(finalGradientColors);
+        return { ...generations[2], imageUrl: result.imageUrl, status: "complete" as const };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         return { ...generations[2], status: "error" as const, error: errorMessage };
@@ -768,7 +1064,7 @@ export async function generateDalleForApproach(
         const finalColors = gradientColors.length > 0
           ? gradientColors
           : [colors.accent, colors.sidebarBackground];
-        const imageUrl = await generateGradientImage(finalColors);
+        const { imageUrl } = await generateGradientImage(finalColors);
         return {
           approach,
           prompt: getGradientPrompt(finalColors),

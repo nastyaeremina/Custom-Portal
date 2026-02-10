@@ -1,9 +1,40 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { UrlInputForm } from "@/components/features/UrlInputForm";
 import { PortalPreview } from "@/components/portal/PortalPreview";
+import { LoginView } from "@/components/portal/LoginView";
+import { Navbar } from "@/components/marketing/Navbar";
+import { CTABanner } from "@/components/marketing/CTABanner";
+import { Footer } from "@/components/marketing/Footer";
 import { PortalData, RawOutputs } from "@/types/api";
+import type { PreviewBranding, PreviewTheme } from "@/types/preview";
+import { toPreviewPayload } from "@/types/preview";
+
+/* ─── Static hero card defaults ─── */
+const STATIC_BRANDING: PreviewBranding = {
+  companyName: "Assembly",
+  logoUrl: "/assets/icons/Brandmages logo (small inverse).svg",
+  squareIconBg: null,
+  fullLogoUrl: null,
+};
+
+const STATIC_THEME: PreviewTheme = {
+  sidebarBackground: "#101618",
+  sidebarText: "#ffffff",
+  accent: "#3b82f6",
+};
+
+const STATIC_HERO_IMAGE = "/assets/Images/Rectangle 34624749.png";
+
+/* Card dimensions matching PortalPreview carousel cards */
+const STATIC_CARD_W = 660;
+const STATIC_CARD_H = 525;
+/* LoginView native inner size (from CARD_CONFIGS.login) */
+const LOGIN_INNER_W = 626;
+const LOGIN_INNER_H = 465;
+const LOGIN_PAD_TOP = 31;
+const LOGIN_PAD_LEFT = 34;
 
 interface StreamEvent {
   type: "scraping" | "colors" | "images" | "dalle" | "dalle_progress" | "complete" | "error";
@@ -19,6 +50,12 @@ export default function Home() {
   const [portalData, setPortalData] = useState<PortalData | null>(null);
   const [rawOutputs, setRawOutputs] = useState<RawOutputs | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /** Transform pipeline output → preview payload (memoized) */
+  const previewPayload = useMemo(
+    () => (portalData ? toPreviewPayload(portalData, rawOutputs) : null),
+    [portalData, rawOutputs]
+  );
 
   const handleSubmit = useCallback(async (input: string) => {
     setIsLoading(true);
@@ -79,9 +116,13 @@ export default function Home() {
                   },
                   images: {
                     squareIcon: event.data?.images?.squareIcon ?? prev?.images?.squareIcon ?? null,
+                    squareIconBg: event.data?.images?.squareIconBg ?? prev?.images?.squareIconBg ?? null,
                     fullLogo: event.data?.images?.fullLogo ?? prev?.images?.fullLogo ?? null,
                     loginImage: event.data?.images?.loginImage ?? prev?.images?.loginImage ?? null,
+                    dashboardImage: event.data?.images?.dashboardImage ?? prev?.images?.dashboardImage ?? null,
                     socialImage: event.data?.images?.socialImage ?? prev?.images?.socialImage ?? null,
+                    rawFaviconUrl: event.data?.images?.rawFaviconUrl ?? prev?.images?.rawFaviconUrl ?? null,
+                    rawLogoUrl: event.data?.images?.rawLogoUrl ?? prev?.images?.rawLogoUrl ?? null,
                   },
                 }));
               }
@@ -124,24 +165,50 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="min-h-screen py-16 px-4">
-      <div className="max-w-3xl mx-auto">
-        {/* Header */}
-        <div className="text-center mb-10">
-          <h1 className="text-4xl font-bold text-neutral-900 mb-4 tracking-tight">
-            Create a customized
-            <br />
-            white-labeled client portal
-          </h1>
-          <p className="text-neutral-500">
-            Enter your work email or company website to
-            <br />
-            preview your branded client portal.
-          </p>
-        </div>
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--offwhite-100)" }}>
+      {/* ─── Navbar ─── */}
+      <Navbar />
 
-        {/* Input Form */}
-        <div className="mb-10">
+      {/* ─── Hero Section ─── */}
+      <section
+        className="flex flex-col items-center"
+        style={{ padding: "var(--space-48) var(--space-40)", gap: "var(--space-48)" }}
+      >
+        {/* Hero content: heading + subtitle + search */}
+        <div
+          className="flex flex-col items-center text-center"
+          style={{ gap: "var(--space-40)", maxWidth: "832px" }}
+        >
+          {/* Text group */}
+          <div className="flex flex-col items-center" style={{ gap: "var(--space-24)" }}>
+            <h1
+              className="font-semibold"
+              style={{
+                fontSize: "var(--font-size-h1)",
+                lineHeight: "var(--line-height-h1)",
+                color: "var(--text-primary)",
+                maxWidth: "832px",
+              }}
+            >
+              Create a customized
+              <br />
+              white-labeled client portal
+            </h1>
+            <p
+              style={{
+                fontSize: "var(--font-size-body)",
+                lineHeight: "var(--line-height-body)",
+                color: "var(--text-secondary)",
+                maxWidth: "550px",
+              }}
+            >
+              Enter your work email or company website to
+              <br />
+              preview your branded client portal.
+            </p>
+          </div>
+
+          {/* Search bar */}
           <UrlInputForm
             onSubmit={handleSubmit}
             isLoading={isLoading}
@@ -151,30 +218,81 @@ export default function Home() {
 
         {/* Status Message */}
         {statusMessage && (
-          <div className="mb-4 flex items-center justify-center gap-2 text-sm text-neutral-500">
-            <div className="w-4 h-4 border-2 border-neutral-300 border-t-neutral-600 rounded-full animate-spin" />
+          <div
+            className="flex items-center justify-center gap-2"
+            style={{ color: "var(--text-secondary)", fontSize: "var(--font-size-caption)" }}
+          >
+            <div
+              className="w-4 h-4 border-2 rounded-full animate-spin"
+              style={{ borderColor: "var(--border-default)", borderTopColor: "var(--text-secondary)" }}
+            />
             {statusMessage}
           </div>
         )}
 
         {/* Error Display */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+          <div
+            className="max-w-lg w-full p-4 rounded-[var(--radius-md)] text-sm"
+            style={{
+              backgroundColor: "#fef2f2",
+              border: "1px solid #fecaca",
+              color: "#dc2626",
+            }}
+          >
             {error}
           </div>
         )}
 
-        {/* Portal Preview */}
-        {(isLoading || portalData) && (
-          <div className="mb-10">
+        {/* Static hero card — shown before any generation */}
+        {!isLoading && !previewPayload && (
+          <div
+            className="overflow-hidden select-none pointer-events-none"
+            style={{
+              width: `${STATIC_CARD_W}px`,
+              height: `${STATIC_CARD_H}px`,
+              backgroundColor: "#F2F2E8",
+              borderRadius: "9px",
+              border: "1px solid #ECECE0",
+            }}
+          >
+            <div
+              style={{
+                width: `${LOGIN_INNER_W}px`,
+                height: `${LOGIN_INNER_H}px`,
+                transform: `translate(${LOGIN_PAD_LEFT}px, ${LOGIN_PAD_TOP}px)`,
+                transformOrigin: "top left",
+              }}
+            >
+              <LoginView
+                branding={STATIC_BRANDING}
+                theme={STATIC_THEME}
+                loginHeroImageUrl={STATIC_HERO_IMAGE}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Portal Preview — shown after generation */}
+        {(isLoading || previewPayload) && (
+          <div className="w-full max-w-[1200px]">
             <PortalPreview
-              data={portalData}
-              rawOutputs={rawOutputs}
-              isLoading={isLoading && !portalData}
+              payload={previewPayload}
+              isLoading={isLoading && !previewPayload}
             />
           </div>
         )}
-      </div>
-    </main>
+      </section>
+
+      {/* ─── CTA Banner ─── */}
+      <section className="px-[var(--space-40)] pb-[var(--space-64)]">
+        <div className="max-w-[1360px] mx-auto">
+          <CTABanner />
+        </div>
+      </section>
+
+      {/* ─── Footer ─── */}
+      <Footer />
+    </div>
   );
 }

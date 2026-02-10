@@ -2,8 +2,8 @@ import { Page } from "puppeteer";
 import { ScrapedImage } from "./types";
 
 export async function extractFavicon(page: Page): Promise<string | null> {
-  const faviconUrl = await page.evaluate(() => {
-    // Check multiple favicon sources in order of preference
+  // Collect ALL candidate URLs from the DOM (ordered by preference)
+  const candidateHrefs = await page.evaluate(() => {
     const sources: string[] = [];
 
     // 1. Apple touch icon (highest quality)
@@ -22,28 +22,85 @@ export async function extractFavicon(page: Page): Promise<string | null> {
       if (href) sources.push(href);
     }
 
-    // 3. Standard icon links
+    // 3. Well-known /apple-touch-icon.png (many sites serve this even
+    //    without declaring it in HTML; it's always a square PNG that
+    //    Sharp can process, unlike .ico files which Sharp cannot read).
+    //    Checked BEFORE standard icon links because those often point
+    //    to .ico files that fail Sharp processing.
+    sources.push("/apple-touch-icon.png");
+
+    // 4. Standard icon links
     const icons = document.querySelectorAll('link[rel="icon"], link[rel="shortcut icon"]');
     icons.forEach((icon) => {
       const href = icon.getAttribute("href");
       if (href) sources.push(href);
     });
 
-    // 4. Fallback to /favicon.ico
+    // 5. Fallback to /favicon.ico
     sources.push("/favicon.ico");
 
-    return sources.length > 0 ? sources[0] : null;
+    return sources;
   });
 
-  if (!faviconUrl) return null;
+  if (!candidateHrefs || candidateHrefs.length === 0) return null;
 
-  // Convert to absolute URL
   const pageUrl = page.url();
-  try {
-    return new URL(faviconUrl, pageUrl).href;
-  } catch {
-    return null;
+
+  // Resolve to absolute URLs, dedup
+  const seen = new Set<string>();
+  const absoluteUrls: string[] = [];
+  for (const href of candidateHrefs) {
+    try {
+      const abs = new URL(href, pageUrl).href;
+      if (!seen.has(abs)) {
+        seen.add(abs);
+        absoluteUrls.push(abs);
+      }
+    } catch {
+      // skip malformed URLs
+    }
   }
+
+  // Iterate candidates: first one that passes the quality gate wins
+  for (const url of absoluteUrls) {
+    // data: URLs (inline SVG/PNG from page) are always valid
+    if (url.startsWith("data:")) return url;
+
+    try {
+      // Try HEAD first (cheap), fall back to GET if HEAD is rejected
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "HEAD",
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)" },
+          signal: AbortSignal.timeout(4000),
+        });
+      } catch {
+        response = await fetch(url, {
+          method: "GET",
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)" },
+          signal: AbortSignal.timeout(4000),
+        });
+      }
+
+      // Require 2xx
+      if (!response.ok) continue;
+
+      // Require image Content-Type (reject text/html 404 pages)
+      const ct = (response.headers.get("content-type") || "").toLowerCase();
+      if (!ct.startsWith("image/") && !ct.includes("icon")) continue;
+      if (ct.startsWith("text/")) continue;
+
+      return url;
+    } catch {
+      // Network error / timeout — skip to next candidate
+      continue;
+    }
+  }
+
+  // None passed — return the first candidate anyway as a last resort
+  // (the browser may still be able to render it)
+  return absoluteUrls[0] || null;
 }
 
 export async function extractLogo(page: Page): Promise<string | null> {

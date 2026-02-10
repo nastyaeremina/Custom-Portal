@@ -4,14 +4,16 @@ import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
 import { cleanCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
-import { generateColorScheme, selectAccentColor, selectSidebarColors } from "@/lib/colors/generator";
+import { generateValidatedColorScheme, selectAccentColorWithContext, selectSidebarColors } from "@/lib/colors/generator";
 import {
   processSquareIcon,
+  extractSquareIconBg,
   processFullLogo,
   processLoginImage,
   processSocialImage,
 } from "@/lib/images/processor";
-import { isOpenAIConfigured, generateGradientImagePublic, extractColorsFromScrapedImages } from "@/lib/images/dalle";
+import { isOpenAIConfigured, generateGradientImagePublic, extractColorsFromScrapedImages, type GradientDebug } from "@/lib/images/dalle";
+import { detectDiscipline, selectHeroImage } from "@/lib/discipline";
 
 export const maxDuration = 60; // Allow up to 60 seconds
 
@@ -40,19 +42,39 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
-    // 5. Select accent color using priority logic:
-    //    favicon -> logo -> link/button colors -> null
-    const accentResult = await selectAccentColor({
+    // 5. Select accent color WITH context (extracts both favicon and logo saturation)
+    const accentSelection = await selectAccentColorWithContext({
       squareIconUrl: scrapedData.favicon,
       logoUrl: scrapedData.logo,
       linkButtonColors: scrapedData.linkButtonColors,
     });
 
-    // 6. Generate color scheme using nav/header background and accent
-    const colors = generateColorScheme(
+    const accentResult = accentSelection.result;
+
+    // 6. Build extracted colors list for quality gate context
+    const allExtractedColors = [
+      ...scrapedData.colors,
+      ...(scrapedData.linkButtonColors || []),
+    ];
+
+    // 7. Generate VALIDATED color scheme with quality gate
+    const validatedColors = generateValidatedColorScheme(
       scrapedData.navHeaderBackground,
-      accentResult.color
+      accentResult,
+      {
+        faviconSaturation: accentSelection.faviconSaturation,
+        logoSaturation: accentSelection.logoSaturation,
+        linkButtonColors: scrapedData.linkButtonColors || [],
+        allExtractedColors,
+      }
     );
+
+    // Extract the final colors for use
+    const colors = {
+      sidebarBackground: validatedColors.sidebarBackground,
+      sidebarText: validatedColors.sidebarText,
+      accent: validatedColors.accent,
+    };
 
     // Get sidebar source for debug info
     const sidebarResult = selectSidebarColors({
@@ -60,17 +82,41 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       accentColor: accentResult.color,
     });
 
-    // 7. Process images
+    // ── Discipline detection ──────────────────────────────────────
+    const disciplineResult = detectDiscipline({
+      url: targetUrl,
+      title: scrapedData.title,
+      description: scrapedData.description,
+      meta: scrapedData.meta,
+    });
+
+    const heroSelection = selectHeroImage(disciplineResult, targetUrl);
+
+    console.log(
+      `[discipline] ${targetUrl} → ${disciplineResult.discipline} ` +
+      `(confidence: ${disciplineResult.confidence}, signals: [${disciplineResult.signals.join(", ")}]) ` +
+      `→ hero: ${heroSelection.selected ? heroSelection.imageUrl : "SKIP → gradient fallback"} ` +
+      `(${heroSelection.reason})`
+    );
+
+    // 8. Process images
     let squareIcon: string | null = null;
+    let squareIconBg: string | null = null;
     let fullLogo: string | null = null;
-    let loginImage: string | null = null;
     let socialImage: string | null = null;
     let dalleImageUrl: string | null = null;
 
-    // Process square icon (from favicon)
+    // Login image: library takes priority, gradient is fallback
+    let loginImage: string | null = heroSelection.selected ? heroSelection.imageUrl : null;
+    let loginImageSource: string = heroSelection.selected ? "library" : "gradient";
+
+    // Process square icon (from favicon) + extract dominant background
     if (scrapedData.favicon) {
       try {
         squareIcon = await processSquareIcon(scrapedData.favicon);
+        if (squareIcon) {
+          squareIconBg = await extractSquareIconBg(squareIcon);
+        }
       } catch (error) {
         console.error("Error processing square icon:", error);
       }
@@ -93,6 +139,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       type: img.type,
     }));
 
+    let gradientDebugInfo: GradientDebug | undefined;
+
+    // Extract domain for deterministic gradient hashing
+    let domain = "unknown";
+    try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+
     if (isOpenAIConfigured()) {
       try {
         console.log("Generating gradient image...");
@@ -101,9 +153,21 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         const finalColors = gradientColors.length > 0
           ? gradientColors
           : [colors.accent, colors.sidebarBackground];
-        dalleImageUrl = await generateGradientImagePublic(finalColors);
-        // Always use gradient for login image
-        loginImage = dalleImageUrl;
+        const gradientResult = await generateGradientImagePublic(finalColors, domain);
+        dalleImageUrl = gradientResult.imageUrl;
+        gradientDebugInfo = gradientResult.debug;
+
+        console.log(
+          `[gradient] ${domain} → mode: ${gradientResult.debug.mode}, ` +
+          `angle: ${gradientResult.debug.angle}°, stops: [${gradientResult.debug.stops.join(", ")}] ` +
+          `(${gradientResult.debug.reason})`
+        );
+
+        // Use gradient for login only if discipline library didn't provide one
+        if (!loginImage) {
+          loginImage = dalleImageUrl;
+          loginImageSource = "gradient";
+        }
       } catch (error) {
         console.error("Error generating gradient image:", error);
       }
@@ -125,22 +189,26 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
-    // 8. Clean company name
+    // 9. Clean company name
     const companyName = cleanCompanyName(
       scrapedData.meta["og:site_name"] ||
       scrapedData.meta["og:title"] ||
       scrapedData.title
     );
 
-    // 9. Build response
+    // 10. Build response
     const portalData: PortalData = {
       companyName,
       colors,
       images: {
         squareIcon,
+        squareIconBg,
         fullLogo,
         loginImage,
+        dashboardImage: dalleImageUrl,
         socialImage,
+        rawFaviconUrl: scrapedData.favicon,
+        rawLogoUrl: scrapedData.logo,
       },
     };
 
@@ -162,6 +230,28 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       accentColorConfidence: accentResult.isHighConfidence ? "high" : "low",
       navHeaderBackground: scrapedData.navHeaderBackground,
       sidebarColorSource: sidebarResult.source,
+      qualityGateResult: {
+        passed: validatedColors.qualityGate.passed,
+        checks: validatedColors.qualityGate.checks,
+        adjustments: validatedColors.qualityGate.adjustments,
+        iterations: validatedColors.qualityGate.iterations,
+        originalColors: validatedColors.qualityGate.originalColors,
+      },
+      accentPromotion: validatedColors.accentPromotion,
+      disciplineDetection: {
+        discipline: disciplineResult.discipline,
+        confidence: disciplineResult.confidence,
+        signals: disciplineResult.signals,
+        heroSelection: {
+          selected: heroSelection.selected,
+          imageUrl: heroSelection.imageUrl,
+          reason: heroSelection.reason,
+          availableCount: heroSelection.availableCount,
+          chosenIndex: heroSelection.chosenIndex,
+        },
+        loginImageSource,
+      },
+      gradientDebug: gradientDebugInfo,
     };
 
     return NextResponse.json({
