@@ -65,7 +65,7 @@ export interface HeroSelectionResult {
  * Same string always produces the same number.
  * Uses djb2 (Dan Bernstein's algorithm).
  */
-function hashString(str: string): number {
+export function hashString(str: string): number {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0; // unsigned
@@ -176,6 +176,48 @@ export function selectHeroImage(
     discipline,
     confidence,
     reason: `matched ${discipline} with confidence ${confidence}, hash("${domain}")=${hash} → index ${index}/${images.length}`,
+    availableCount: images.length,
+    chosenIndex: index,
+  };
+}
+
+/**
+ * Pick a generic library image deterministically by domain hash.
+ *
+ * Unlike `selectHeroImage()` this function bypasses all confidence gates.
+ * It always selects an image from `generic/` — the only failure mode is
+ * an empty folder, in which case it returns `selected: false`.
+ *
+ * Used by the decision tree when the palette is too flat for a gradient
+ * and no discipline matched.
+ */
+export function pickGenericImage(url: string): HeroSelectionResult {
+  const images = listHeroImages("generic");
+
+  if (images.length === 0) {
+    return {
+      selected: false,
+      imageUrl: null,
+      discipline: "generic",
+      confidence: 0,
+      reason: "no images in generic/ folder",
+      availableCount: 0,
+      chosenIndex: -1,
+    };
+  }
+
+  const domain = extractDomain(url);
+  const hash = hashString(domain);
+  const index = hash % images.length;
+  const chosenFile = images[index];
+  const publicUrl = `/assets/login-hero/generic/${chosenFile}`;
+
+  return {
+    selected: true,
+    imageUrl: publicUrl,
+    discipline: "generic",
+    confidence: 0,
+    reason: `generic pick: hash("${domain}")=${hash} → index ${index}/${images.length}`,
     availableCount: images.length,
     chosenIndex: index,
   };

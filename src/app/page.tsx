@@ -142,6 +142,11 @@ export default function Home() {
                   accentColorConfidence: event.rawOutputs?.accentColorConfidence ?? prev?.accentColorConfidence,
                   navHeaderBackground: event.rawOutputs?.navHeaderBackground ?? prev?.navHeaderBackground,
                   sidebarColorSource: event.rawOutputs?.sidebarColorSource ?? prev?.sidebarColorSource,
+                  qualityGateResult: event.rawOutputs?.qualityGateResult ?? prev?.qualityGateResult,
+                  accentPromotion: event.rawOutputs?.accentPromotion ?? prev?.accentPromotion,
+                  disciplineDetection: event.rawOutputs?.disciplineDetection ?? prev?.disciplineDetection,
+                  gradientDebug: event.rawOutputs?.gradientDebug ?? prev?.gradientDebug,
+                  diversityScore: event.rawOutputs?.diversityScore ?? prev?.diversityScore,
                 }));
               }
 

@@ -25,7 +25,8 @@ import {
   computeGradientDebug,
   type GradientDebug,
 } from "@/lib/images/dalle";
-import { detectDiscipline, selectHeroImage } from "@/lib/discipline";
+import { detectDiscipline, selectHeroImage, pickGenericImage, hashString } from "@/lib/discipline";
+import { scorePaletteDiversity } from "@/lib/images/palette-scorer";
 
 export const maxDuration = 120; // Allow up to 120 seconds for multiple DALL-E generations
 
@@ -146,6 +147,34 @@ export async function POST(request: NextRequest) {
           type: img.type,
         }));
 
+        // Extract domain for deterministic hashing
+        let domain = "unknown";
+        try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+
+        // ── Gradient color extraction (moved early for diversity scoring) ──
+        const gradientColorsForDebug = await extractColorsFromScrapedImages(scrapedImagesInfo);
+        const finalGradientColorsForDebug = gradientColorsForDebug.length > 0
+          ? gradientColorsForDebug
+          : [colors.accent, colors.sidebarBackground];
+        const gradientDebugInfo: GradientDebug = computeGradientDebug(finalGradientColorsForDebug, domain);
+
+        console.log(
+          `[gradient] ${domain} → mode: ${gradientDebugInfo.mode}, ` +
+          `angle: ${gradientDebugInfo.angle}°, stops: [${gradientDebugInfo.stops.join(", ")}] ` +
+          `(${gradientDebugInfo.reason})`
+        );
+
+        // ── Palette diversity scoring ──────────────────────────────────────
+        const diversity = scorePaletteDiversity(
+          gradientDebugInfo.stops,
+          gradientDebugInfo.mode === "preset"
+        );
+        const diverse = diversity.useGradient;
+
+        console.log(
+          `[diversity] ${domain} → ${diversity.reason} → ${diverse ? "gradient OK" : "use library"}`
+        );
+
         // Prepare logo centered input (prefer icon over logo)
         const logoCenteredInput: LogoCenteredInput = {
           iconUrl: scrapedData.favicon,
@@ -185,14 +214,53 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        // Login image: discipline library takes priority, gradient is fallback.
-        // Computed early so all SSE events can include it (prevents flash).
-        let loginImage: string | null = heroSelection.selected ? heroSelection.imageUrl : null;
-        let loginImageSource: string = heroSelection.selected ? "library" : "gradient";
+        // ── Decision tree: login + dashboard hero images ──────────────────
+        // Resolved early so all SSE events carry non-null URLs (prevents flash).
+        // When source is "gradient", the value stays null until gradient generation.
+        let loginImage: string | null = null;
+        let loginImageSource: string;
+        let dashboardImage: string | null = null;
+        let dashboardImageSource: string;
+
+        if (heroSelection.selected) {
+          // ── DISCIPLINE MATCH ──
+          loginImage = heroSelection.imageUrl;
+          loginImageSource = "discipline";
+          if (diverse) {
+            // Dashboard = gradient (filled after generation)
+            dashboardImage = null;
+            dashboardImageSource = "gradient";
+          } else {
+            // Dashboard = generic library image
+            const generic = pickGenericImage(targetUrl);
+            dashboardImage = generic.selected ? generic.imageUrl : null;
+            dashboardImageSource = generic.selected ? "generic" : "gradient";
+          }
+        } else if (diverse) {
+          // ── NO DISCIPLINE, HIGH DIVERSITY → login = gradient ──
+          loginImage = null; // filled after gradient generation
+          loginImageSource = "gradient";
+          // Dashboard = generic library image (avoids showing the same gradient twice)
+          const generic = pickGenericImage(targetUrl);
+          dashboardImage = generic.selected ? generic.imageUrl : null;
+          dashboardImageSource = generic.selected ? "generic" : "gradient";
+        } else {
+          // ── NO DISCIPLINE, LOW DIVERSITY → login = generic ──
+          const generic = pickGenericImage(targetUrl);
+          loginImage = generic.selected ? generic.imageUrl : null;
+          loginImageSource = generic.selected ? "generic" : "gradient";
+          // Dashboard = SAME image as login
+          dashboardImage = loginImage;
+          dashboardImageSource = loginImage ? "generic_same_as_login" : "gradient";
+        }
+
+        console.log(
+          `[hero-tree] ${domain} → login: ${loginImageSource}${loginImage ? ` (${loginImage})` : " (pending gradient)"} ` +
+          `| dashboard: ${dashboardImageSource}${dashboardImage ? ` (${dashboardImage})` : " (pending gradient)"}`
+        );
 
         // Send colors and basic data event
-        // Include loginImage early — discipline hero selection is already done,
-        // so the client can render the login card without a flash/fallback swap.
+        // Include loginImage + dashboardImage early (prevents flash/fallback swap).
         controller.enqueue(encoder.encode(createSSEMessage({
           type: "colors",
           message: "Colors extracted",
@@ -204,7 +272,7 @@ export async function POST(request: NextRequest) {
               squareIconBg: null,
               fullLogo: null,
               loginImage,
-              dashboardImage: null,
+              dashboardImage,
               socialImage: null,
               rawFaviconUrl: scrapedData.favicon,
               rawLogoUrl: scrapedData.logo,
@@ -232,6 +300,7 @@ export async function POST(request: NextRequest) {
               originalColors: validatedColors.qualityGate.originalColors,
             },
             accentPromotion: validatedColors.accentPromotion,
+            diversityScore: diversity,
           },
         })));
 
@@ -276,7 +345,7 @@ export async function POST(request: NextRequest) {
               squareIconBg,
               fullLogo,
               loginImage,
-              dashboardImage: null,
+              dashboardImage,
               socialImage: null,
               rawFaviconUrl: scrapedData.favicon,
               rawLogoUrl: scrapedData.logo,
@@ -307,7 +376,7 @@ export async function POST(request: NextRequest) {
                 squareIconBg,
                 fullLogo,
                 loginImage,
-                dashboardImage: null,
+                dashboardImage,
                 socialImage: scrapedSocialImage,
                 rawFaviconUrl: scrapedData.favicon,
                 rawLogoUrl: scrapedData.logo,
@@ -315,11 +384,6 @@ export async function POST(request: NextRequest) {
             },
           })));
         }
-
-        // Extract domain for deterministic gradient hashing
-        let domain = "unknown";
-        try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
-        let gradientDebugInfo: GradientDebug | undefined;
 
         // Generate all image approaches (deterministic, no AI)
         if (isOpenAIConfigured()) {
@@ -341,17 +405,19 @@ export async function POST(request: NextRequest) {
               scrapedData.ogImage
             );
 
-            // Find the gradient generation (approach 3) for login image
+            // Find the gradient generation for hero images
             const gradientGeneration = dalleGenerations.find(
               g => g.approach === "gradient" && g.status === "complete" && g.imageUrl
             );
 
             if (gradientGeneration?.imageUrl) {
               dalleImageUrl = gradientGeneration.imageUrl;
-              // Use gradient for login only if discipline library didn't provide one
-              if (!loginImage) {
+              // Fill in any "gradient" slots that were deferred
+              if (loginImageSource === "gradient" && !loginImage) {
                 loginImage = gradientGeneration.imageUrl;
-                loginImageSource = "gradient";
+              }
+              if (dashboardImageSource === "gradient" && !dashboardImage) {
+                dashboardImage = gradientGeneration.imageUrl;
               }
             }
 
@@ -365,20 +431,6 @@ export async function POST(request: NextRequest) {
                 console.error("Error processing gradient image for social:", error);
               }
             }
-
-            // Compute gradient debug info (lightweight, synchronous)
-            // Use the same color inputs that generateAllDalleImages used internally
-            const gradientColorsForDebug = await extractColorsFromScrapedImages(scrapedImagesInfo);
-            const finalGradientColorsForDebug = gradientColorsForDebug.length > 0
-              ? gradientColorsForDebug
-              : [colors.accent, colors.sidebarBackground];
-            gradientDebugInfo = computeGradientDebug(finalGradientColorsForDebug, domain);
-
-            console.log(
-              `[gradient] ${domain} → mode: ${gradientDebugInfo.mode}, ` +
-              `angle: ${gradientDebugInfo.angle}°, stops: [${gradientDebugInfo.stops.join(", ")}] ` +
-              `(${gradientDebugInfo.reason})`
-            );
 
             // Send update with generations
             controller.enqueue(encoder.encode(createSSEMessage({
@@ -409,7 +461,7 @@ export async function POST(request: NextRequest) {
             squareIconBg,
             fullLogo,
             loginImage,
-            dashboardImage: dalleImageUrl,
+            dashboardImage,
             socialImage,
             rawFaviconUrl: scrapedData.favicon,
             rawLogoUrl: scrapedData.logo,
@@ -450,8 +502,10 @@ export async function POST(request: NextRequest) {
               chosenIndex: heroSelection.chosenIndex,
             },
             loginImageSource,
+            dashboardImageSource,
           },
           gradientDebug: gradientDebugInfo,
+          diversityScore: diversity,
         };
 
         controller.enqueue(encoder.encode(createSSEMessage({

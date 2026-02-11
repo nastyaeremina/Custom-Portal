@@ -56,12 +56,24 @@ const CARD_H = 525;
 const CARD_GAP = 25;
 const SPACING = CARD_W + CARD_GAP; // center-to-center distance
 
-const AUTOPLAY_SPEED = 0.35; // cards per second
-const FRICTION = 0.92; // drag momentum decay per frame
-const SNAP_STIFFNESS = 0.08; // spring toward nearest integer pos
-const SNAP_THRESHOLD = 0.01; // close enough to snap hard
-const RESUME_DELAY = 1500; // ms before autoplay resumes after mouse leave
-const DOT_SPRING = 0.15; // dot indicator spring stiffness
+// ── Motion tuning ──
+const AUTOPLAY_SPEED    = 0.18;     // cards/sec (slower, more premium)
+const AUTOPLAY_RAMP_MS  = 500;      // ease-in duration when autoplay resumes
+const DRAG_RESISTANCE   = 0.85;     // pointer delta multiplier (dampens fast drags)
+const MAX_FLICK_VEL     = 2.0;      // max cards/sec after drag release
+const FRICTION_TAU      = 550;      // momentum decay time constant in ms (time-based)
+const VEL_DEADZONE      = 0.0005;   // below this → velocity = 0
+
+// Snap spring-damper (critically damped feel)
+const SNAP_K            = 0.035;    // spring stiffness
+const SNAP_C            = 0.12;     // damping coefficient
+const SNAP_POS_EPS      = 0.002;    // position "close enough"
+const SNAP_VEL_EPS      = 0.0003;   // velocity "close enough"
+
+const RESUME_DELAY      = 1500;     // ms before autoplay resumes after mouse leave
+const DOT_SPRING        = 0.08;     // dot indicator stiffness (smoother lag)
+
+
 
 /* ─── Circular math helpers ─── */
 
@@ -93,31 +105,47 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
   const dragStartPos = useRef(0);
   const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoplayActive = useRef(false);
+  const autoplayResumeAt = useRef(0); // timestamp when autoplay resumed (for ease-in)
+  const prefersReducedMotion = useRef(false);
 
   /* ─── Core animation loop ─── */
   const tick = useCallback(
     (time: number) => {
       if (!lastTime.current) lastTime.current = time;
-      const dt = Math.min((time - lastTime.current) / 1000, 0.05); // cap at 50ms
+      const dtMs = Math.min(time - lastTime.current, 50); // cap at 50ms
+      const dt = dtMs / 1000;
       lastTime.current = time;
 
+      const reduced = prefersReducedMotion.current;
+
       if (!isDragging.current) {
-        if (autoplayActive.current && !isPaused.current) {
-          // Autoplay: constant speed forward
-          pos.current += AUTOPLAY_SPEED * dt;
-        } else if (Math.abs(vel.current) > 0.001) {
-          // Momentum from drag release
+        if (autoplayActive.current && !isPaused.current && !reduced) {
+          // Autoplay with smoothstep ease-in ramp
+          const elapsed = time - autoplayResumeAt.current;
+          const ramp = Math.min(elapsed / AUTOPLAY_RAMP_MS, 1);
+          const easedRamp = ramp * ramp * (3 - 2 * ramp); // smoothstep
+          pos.current += AUTOPLAY_SPEED * easedRamp * dt;
+        } else if (Math.abs(vel.current) > VEL_DEADZONE && !reduced) {
+          // Momentum: time-based exponential decay
           pos.current += vel.current * dt;
-          vel.current *= FRICTION;
+          vel.current *= Math.exp(-dtMs / FRICTION_TAU);
+          if (Math.abs(vel.current) < VEL_DEADZONE) vel.current = 0;
         } else {
-          // Snap to nearest integer via spring
-          vel.current = 0;
+          // Snap: critically damped spring
           const nearest = Math.round(pos.current);
           const delta = nearest - pos.current;
-          if (Math.abs(delta) > SNAP_THRESHOLD) {
-            pos.current += delta * SNAP_STIFFNESS;
+
+          if (reduced) {
+            // Reduced motion: snap instantly
+            pos.current = nearest;
+            vel.current = 0;
+          } else if (Math.abs(delta) > SNAP_POS_EPS || Math.abs(vel.current) > SNAP_VEL_EPS) {
+            const accel = delta * SNAP_K - vel.current * SNAP_C;
+            vel.current += accel * dtMs;
+            pos.current += vel.current * dt;
           } else {
             pos.current = nearest;
+            vel.current = 0;
           }
         }
       }
@@ -125,9 +153,9 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       // Wrap position
       pos.current = wrap(pos.current, N);
 
-      // Spring-animate dot position toward pos
+      // Spring-animate dot position (smoother lag)
       const dotDelta = shortestDelta(dotPos.current, pos.current, N);
-      if (Math.abs(dotDelta) > SNAP_THRESHOLD) {
+      if (Math.abs(dotDelta) > SNAP_POS_EPS) {
         dotPos.current = wrap(dotPos.current + dotDelta * DOT_SPRING, N);
       } else {
         dotPos.current = pos.current;
@@ -161,7 +189,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
 
       // Opacity: centered card = 1, others fade
       const absDist = Math.abs(d);
-      const opacity = Math.max(0, 1 - absDist * 0.3);
+      const opacity = Math.max(0, 1 - absDist * 0.35);
       card.style.opacity = String(opacity);
     }
 
@@ -179,6 +207,17 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     }
   }, []);
 
+  /* ─── Reduced motion preference ─── */
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    prefersReducedMotion.current = mq.matches;
+    const handler = (e: MediaQueryListEvent) => {
+      prefersReducedMotion.current = e.matches;
+    };
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
   /* ─── Start / stop animation loop ─── */
   useEffect(() => {
     rafId.current = requestAnimationFrame(tick);
@@ -190,7 +229,10 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     if (payload && !isLoading) {
       pos.current = 0;
       vel.current = 0;
-      autoplayActive.current = true;
+      if (!prefersReducedMotion.current) {
+        autoplayActive.current = true;
+        autoplayResumeAt.current = performance.now();
+      }
     } else if (isLoading) {
       // During loading, no autoplay — static cards
       autoplayActive.current = false;
@@ -221,6 +263,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       resumeTimer.current = setTimeout(() => {
         if (!isPaused.current) {
           autoplayActive.current = true;
+          autoplayResumeAt.current = performance.now();
           vel.current = 0;
         }
       }, RESUME_DELAY);
@@ -244,8 +287,8 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     (e: React.PointerEvent) => {
       if (!isDragging.current) return;
       const dx = e.clientX - dragStartX.current;
-      // Convert px delta to position delta (negative because drag-right = lower index)
-      const posDelta = -dx / SPACING;
+      // Convert px delta to position delta with drag resistance
+      const posDelta = (-dx / SPACING) * DRAG_RESISTANCE;
       pos.current = wrap(dragStartPos.current + posDelta, N);
     },
     []
@@ -255,11 +298,17 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     (e: React.PointerEvent) => {
       if (!isDragging.current) return;
       isDragging.current = false;
+
+      if (prefersReducedMotion.current) {
+        // Snap instantly, no momentum
+        vel.current = 0;
+        pos.current = Math.round(pos.current);
+        return;
+      }
+
       const dx = e.clientX - dragStartX.current;
-      // Flick velocity: px/frame → cards/sec (approximate)
       vel.current = (-dx / SPACING) * 2;
-      // Clamp velocity
-      vel.current = Math.max(-3, Math.min(3, vel.current));
+      vel.current = Math.max(-MAX_FLICK_VEL, Math.min(MAX_FLICK_VEL, vel.current));
     },
     []
   );

@@ -82,8 +82,10 @@ export interface RawOutputs {
       availableCount: number;
       chosenIndex: number;
     };
-    /** Which source provided the login image: "library" | "gradient" | "static" */
+    /** Which source provided the login image: "discipline" | "gradient" | "generic" */
     loginImageSource: string;
+    /** Which source provided the dashboard image: "gradient" | "generic" | "generic_same_as_login" */
+    dashboardImageSource?: string;
   };
   /** Gradient generation debug snapshot */
   gradientDebug?: {
@@ -99,6 +101,12 @@ export interface RawOutputs {
     presetName?: string;
     /** Original input colors before guardrails */
     inputColors?: string[];
+  };
+  /** Palette diversity score (determines gradient vs library photo) */
+  diversityScore?: {
+    score: number;
+    useGradient: boolean;
+    reason: string;
   };
 }
 
