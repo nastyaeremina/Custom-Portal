@@ -63,16 +63,20 @@ export async function closeBrowser(): Promise<void> {
   }
 }
 
-export async function createPage(browser: Browser, url: string): Promise<Page> {
+// User agents to try in order.  Some WAFs / bot-protection layers block
+// headless Chrome, so we fall back to a simpler agent when we get a 4xx.
+const USER_AGENTS = [
+  // Primary: realistic Chrome
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  // Fallback: lightweight branded agent (matches extractFavicon's direct requests)
+  "Mozilla/5.0 (compatible; BrandScraper/1.0)",
+];
+
+/** Set up a fresh page with request interception and the given user agent. */
+async function setupPage(browser: Browser, ua: string): Promise<Page> {
   const page = await browser.newPage();
-
-  // Set viewport
   await page.setViewport({ width: 1920, height: 1080 });
-
-  // Set user agent to avoid basic bot detection
-  await page.setUserAgent(
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-  );
+  await page.setUserAgent(ua);
 
   // Block unnecessary resources to speed up loading
   await page.setRequestInterception(true);
@@ -85,11 +89,46 @@ export async function createPage(browser: Browser, url: string): Promise<Page> {
     }
   });
 
-  // Navigate with timeout
-  await page.goto(url, {
-    waitUntil: "networkidle2",
-    timeout: 30000,
-  });
+  return page;
+}
 
+export async function createPage(browser: Browser, url: string): Promise<Page> {
+  // Try each user agent; retry on 4xx (typically 403 from WAFs)
+  for (let i = 0; i < USER_AGENTS.length; i++) {
+    const ua = USER_AGENTS[i];
+    const page = await setupPage(browser, ua);
+
+    const response = await page.goto(url, {
+      waitUntil: "networkidle2",
+      timeout: 30000,
+    });
+
+    const status = response?.status() ?? 0;
+
+    // Usable response (2xx/3xx or server errors that won't change with a different UA)
+    if (status === 0 || status < 400 || status >= 500) {
+      return page;
+    }
+
+    // 4xx — close this page and try the next user agent
+    const isLast = i === USER_AGENTS.length - 1;
+    if (!isLast) {
+      console.warn(
+        `[scraper] HTTP ${status} for ${url} with UA "${ua.substring(0, 40)}…", retrying with fallback UA`
+      );
+      await page.close();
+    } else {
+      // Last UA also got 4xx — return the page anyway so extractors can
+      // run (they'll get limited data but won't crash)
+      console.warn(
+        `[scraper] HTTP ${status} for ${url} — all user agents returned 4xx`
+      );
+      return page;
+    }
+  }
+
+  // Shouldn't be reached, but TypeScript needs a return
+  const page = await setupPage(browser, USER_AGENTS[0]);
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
   return page;
 }

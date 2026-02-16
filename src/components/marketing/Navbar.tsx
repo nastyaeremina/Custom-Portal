@@ -28,7 +28,7 @@ export function Navbar({ className }: { className?: string }) {
       className={cn(
         "w-full sticky top-0 z-50",
         "flex items-center justify-between",
-        "px-[var(--space-40)] py-[var(--space-20)]",
+        "px-4 md:px-[var(--space-40)] py-[var(--space-20)]",
         "backdrop-blur-[20px]",
         "transition-[border-color] duration-200",
         className
@@ -41,51 +41,44 @@ export function Navbar({ className }: { className?: string }) {
       }}
     >
       {/* Logo — Assembly full wordmark, sized to match assembly.com (174×32) */}
-      <img
-        src="/assets/icons/Logo.svg"
-        alt="Assembly"
-        height={32}
-        className="h-[32px] w-auto"
-      />
-
-      {/* Nav Links */}
-      <div className="hidden md:flex items-center gap-[var(--space-40)]">
-        {["Products", "Solutions", "Resources", "Customers", "Pricing"].map(
-          (item) => (
-            <a
-              key={item}
-              href="#"
-              className="text-[var(--font-size-button)] font-semibold transition-colors hover:opacity-70"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {item}
-            </a>
-          )
-        )}
-      </div>
+      <a href="https://assembly.com" target="_blank" rel="noopener noreferrer">
+        <img
+          src="/assets/icons/Logo.svg"
+          alt="Assembly"
+          height={32}
+          className="h-[32px] w-auto"
+        />
+      </a>
 
       {/* Right Actions */}
       <div className="flex items-center gap-[var(--space-24)]">
         <a
-          href="#"
+          href="https://assembly.com/book-demo"
+          target="_blank"
+          rel="noopener noreferrer"
           className="hidden md:inline-block text-[var(--font-size-button)] font-normal"
           style={{ color: "var(--text-primary)" }}
         >
           Book demo
         </a>
         <a
-          href="#"
+          href="https://dashboard.assembly.com/"
+          target="_blank"
+          rel="noopener noreferrer"
           className="hidden md:inline-block text-[var(--font-size-button)] font-normal"
           style={{ color: "var(--text-primary)" }}
         >
           Log in
         </a>
-        <button
-          className="px-[var(--space-24)] py-[var(--space-12)] text-[var(--font-size-button)] font-medium text-white rounded-[var(--radius-full)] transition-colors hover:opacity-90"
+        <a
+          href="https://assembly.com/signup"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-[var(--space-24)] py-[var(--space-12)] text-[var(--font-size-button)] font-medium text-white rounded-[var(--radius-full)] transition-colors hover:opacity-90 inline-block"
           style={{ backgroundColor: "var(--base-off-black)" }}
         >
           Start Trial
-        </button>
+        </a>
       </div>
     </nav>
   );

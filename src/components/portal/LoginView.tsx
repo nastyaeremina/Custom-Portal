@@ -14,7 +14,7 @@ export function LoginView({
   theme,
   loginHeroImageUrl,
 }: LoginViewProps) {
-  const { companyName, logoUrl } = branding;
+  const { companyName, logoUrl, squareIconBg, logoDominantColor } = branding;
   const { sidebarBackground, sidebarText } = theme;
 
   return (
@@ -23,10 +23,11 @@ export function LoginView({
       style={{ fontFamily: "var(--font-portal)" }}
     >
       {/* ─── Left: Login form ─── */}
-      <div className="w-[45%] flex flex-col justify-center px-8 py-6">
+      {/* Full width when no hero image (mobile), 45% when hero image present (desktop) */}
+      <div className={`${loginHeroImageUrl ? "w-[45%]" : "w-full"} flex flex-col justify-center px-8 py-6`}>
         {/* Company logo */}
         <div className="mb-8 flex justify-center">
-          <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="login" />
+          <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="login" squareIconBg={squareIconBg} logoDominantColor={logoDominantColor} sidebarBackground={sidebarBackground} />
         </div>
 
         {/* Form fields */}
@@ -103,16 +104,16 @@ export function LoginView({
         </div>
       </div>
 
-      {/* ─── Right: Hero image ─── */}
-      <div className="w-[55%] relative bg-neutral-100">
-        {loginHeroImageUrl && (
+      {/* ─── Right: Hero image (hidden when no image provided) ─── */}
+      {loginHeroImageUrl && (
+        <div className="w-[55%] relative bg-neutral-100 border-l border-neutral-200">
           <img
             src={loginHeroImageUrl}
             alt="Login background"
             className="w-full h-full object-cover"
           />
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

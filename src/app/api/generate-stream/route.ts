@@ -2,16 +2,21 @@ import { NextRequest } from "next/server";
 import { GenerateRequestSchema, PortalData, RawOutputs, DalleGeneration } from "@/types/api";
 import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
-import { cleanCompanyName } from "@/lib/utils/company-name";
+import { selectCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
 import { generateValidatedColorScheme, selectAccentColorWithContext, selectSidebarColors } from "@/lib/colors/generator";
 import {
-  processSquareIcon,
   extractSquareIconBg,
+  extractLogoDominantColor,
   processFullLogo,
   processLoginImage,
   processSocialImage,
 } from "@/lib/images/processor";
+import {
+  selectBestBrandMark,
+  processBrandMark,
+} from "@/lib/images/brand-mark-selector";
+import { evaluateOgHero, evaluateScrapedHeroes, type ScrapedHeroEvaluation } from "@/lib/images/og-hero-scorer";
 import {
   isOpenAIConfigured,
   generateAllDalleImages,
@@ -27,6 +32,7 @@ import {
 } from "@/lib/images/dalle";
 import { detectDiscipline, selectHeroImage, pickGenericImage, hashString } from "@/lib/discipline";
 import { scorePaletteDiversity } from "@/lib/images/palette-scorer";
+import { generateWelcomeMessage } from "@/lib/welcome-message";
 
 export const maxDuration = 120; // Allow up to 120 seconds for multiple DALL-E generations
 
@@ -61,6 +67,25 @@ export async function POST(request: NextRequest) {
 
         // 2. Scrape website
         const scrapedData = await scrapeWebsite(targetUrl);
+
+        // ── Parked-domain detection — wipe brand assets before expensive processing ──
+        if (scrapedData.isParkedDomain) {
+          console.log(
+            `[parked-domain] ${targetUrl} → DETECTED (score: ${scrapedData.parkedDomainSignals?.score}, ` +
+            `signals: [${scrapedData.parkedDomainSignals?.signals.join(", ")}])`
+          );
+          // Null out all brand assets — they belong to the hosting provider
+          scrapedData.favicon = null;
+          scrapedData.logo = null;
+          scrapedData.ogImage = null;
+          scrapedData.manifestIcons = [];
+          scrapedData.images = [];
+          scrapedData.colors = [];
+          scrapedData.colorsWithUsage = [];
+          scrapedData.linkButtonColors = [];
+          scrapedData.navHeaderBackground = null;
+          // Keep: title, description, meta, companyNameCandidates (overridden below)
+        }
 
         // 3. Extract colors from favicon/logo for palette (used for debug display)
         let imageColors: string[] = [];
@@ -114,12 +139,38 @@ export async function POST(request: NextRequest) {
           accentColor: accentResult.color,
         });
 
-        // 7. Clean company name
-        const companyName = cleanCompanyName(
-          scrapedData.meta["og:site_name"] ||
-          scrapedData.meta["og:title"] ||
-          scrapedData.title
+        // 7. Select company name from candidates
+        const companyNameResult = selectCompanyName(scrapedData.companyNameCandidates);
+        // If parked, derive the name from the domain to avoid picking the
+        // hosting provider's name (e.g. "Websupport") from the page title.
+        let companyName = companyNameResult.name;
+        if (scrapedData.isParkedDomain) {
+          try {
+            const domainStem = new URL(targetUrl).hostname
+              .replace(/^www\./, "")
+              .split(".")[0];
+            companyName =
+              domainStem.charAt(0).toUpperCase() + domainStem.slice(1);
+            console.log(
+              `[parked-domain] overriding company name → "${companyName}" (from domain stem)`
+            );
+          } catch {
+            /* keep selectCompanyName result as fallback */
+          }
+        }
+
+        // Debug: log all candidates and scores
+        console.log(
+          `[company-name] ${targetUrl} → "${companyName}" from ${scrapedData.companyNameCandidates.length} candidates`
         );
+        for (const c of companyNameResult.candidates.slice(0, 8)) {
+          console.log(
+            `  [${c.source}${c.parentSource ? ` (${c.parentSource})` : ""}] "${c.value}" → score: ${c.score} (${c.reasons.join(", ")})`
+          );
+        }
+
+        // ── OG hero evaluation (runs in parallel with discipline + gradient) ──
+        const ogHeroPromise = evaluateOgHero(scrapedData.ogImage);
 
         // ── Discipline detection ──────────────────────────────────────
         const disciplineResult = detectDiscipline({
@@ -151,6 +202,18 @@ export async function POST(request: NextRequest) {
         let domain = "unknown";
         try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
 
+        // ── Welcome message (discipline-tailored when confident) ──
+        const welcomeMsg = generateWelcomeMessage({
+          companyName,
+          discipline: disciplineResult.discipline,
+          confidence: disciplineResult.confidence,
+          domain,
+        });
+        console.log(
+          `[welcome] ${domain} → source: ${welcomeMsg.source}` +
+          (welcomeMsg.source === "discipline" ? ` (${disciplineResult.discipline}, confidence: ${disciplineResult.confidence})` : "")
+        );
+
         // ── Gradient color extraction (moved early for diversity scoring) ──
         const gradientColorsForDebug = await extractColorsFromScrapedImages(scrapedImagesInfo);
         const finalGradientColorsForDebug = gradientColorsForDebug.length > 0
@@ -174,6 +237,30 @@ export async function POST(request: NextRequest) {
         console.log(
           `[diversity] ${domain} → ${diversity.reason} → ${diverse ? "gradient OK" : "use library"}`
         );
+
+        // ── Await OG hero evaluation ──────────────────────────────────
+        const ogHeroResult = await ogHeroPromise;
+
+        console.log(
+          `[og-hero] ${domain} → ${ogHeroResult.passed ? "PASS" : "FAIL"} ` +
+            `(${ogHeroResult.score ? `total=${ogHeroResult.score.total}, ${ogHeroResult.score.reasons.join("; ")}` : "no OG image"})`
+        );
+
+        // ── Scraped hero fallback (only when OG image failed) ─────────
+        let scrapedHeroResult: ScrapedHeroEvaluation | null = null;
+
+        if (!ogHeroResult.passed) {
+          scrapedHeroResult = await evaluateScrapedHeroes(
+            scrapedData.images,
+            scrapedData.ogImage
+          );
+
+          console.log(
+            `[scraped-hero] ${domain} → ${scrapedHeroResult.passed ? "PASS" : "FAIL"} ` +
+              `(considered: ${scrapedHeroResult.candidatesConsidered}, tried: ${scrapedHeroResult.candidatesTried}` +
+              `${scrapedHeroResult.score ? `, total=${scrapedHeroResult.score.total}` : ""})`
+          );
+        }
 
         // Prepare logo centered input (prefer icon over logo)
         const logoCenteredInput: LogoCenteredInput = {
@@ -215,6 +302,7 @@ export async function POST(request: NextRequest) {
         }
 
         // ── Decision tree: login + dashboard hero images ──────────────────
+        // Priority: website OG > discipline library > gradient > generic library.
         // Resolved early so all SSE events carry non-null URLs (prevents flash).
         // When source is "gradient", the value stays null until gradient generation.
         let loginImage: string | null = null;
@@ -222,16 +310,38 @@ export async function POST(request: NextRequest) {
         let dashboardImage: string | null = null;
         let dashboardImageSource: string;
 
-        if (heroSelection.selected) {
+        if (ogHeroResult.passed && ogHeroResult.processedImageDataUrl) {
+          // ── WEBSITE OG IMAGE (highest priority) ──
+          loginImage = ogHeroResult.processedImageDataUrl;
+          loginImageSource = "website";
+          if (diverse) {
+            dashboardImage = null;
+            dashboardImageSource = "gradient";
+          } else {
+            const generic = pickGenericImage(targetUrl);
+            dashboardImage = generic.selected ? generic.imageUrl : null;
+            dashboardImageSource = generic.selected ? "generic" : "gradient";
+          }
+        } else if (scrapedHeroResult?.passed && scrapedHeroResult.processedImageDataUrl) {
+          // ── SCRAPED HERO IMAGE (fallback from page content) ──
+          loginImage = scrapedHeroResult.processedImageDataUrl;
+          loginImageSource = "website";
+          if (diverse) {
+            dashboardImage = null;
+            dashboardImageSource = "gradient";
+          } else {
+            const generic = pickGenericImage(targetUrl);
+            dashboardImage = generic.selected ? generic.imageUrl : null;
+            dashboardImageSource = generic.selected ? "generic" : "gradient";
+          }
+        } else if (heroSelection.selected) {
           // ── DISCIPLINE MATCH ──
           loginImage = heroSelection.imageUrl;
           loginImageSource = "discipline";
           if (diverse) {
-            // Dashboard = gradient (filled after generation)
             dashboardImage = null;
             dashboardImageSource = "gradient";
           } else {
-            // Dashboard = generic library image
             const generic = pickGenericImage(targetUrl);
             dashboardImage = generic.selected ? generic.imageUrl : null;
             dashboardImageSource = generic.selected ? "generic" : "gradient";
@@ -240,7 +350,6 @@ export async function POST(request: NextRequest) {
           // ── NO DISCIPLINE, HIGH DIVERSITY → login = gradient ──
           loginImage = null; // filled after gradient generation
           loginImageSource = "gradient";
-          // Dashboard = generic library image (avoids showing the same gradient twice)
           const generic = pickGenericImage(targetUrl);
           dashboardImage = generic.selected ? generic.imageUrl : null;
           dashboardImageSource = generic.selected ? "generic" : "gradient";
@@ -249,7 +358,6 @@ export async function POST(request: NextRequest) {
           const generic = pickGenericImage(targetUrl);
           loginImage = generic.selected ? generic.imageUrl : null;
           loginImageSource = generic.selected ? "generic" : "gradient";
-          // Dashboard = SAME image as login
           dashboardImage = loginImage;
           dashboardImageSource = loginImage ? "generic_same_as_login" : "gradient";
         }
@@ -270,6 +378,7 @@ export async function POST(request: NextRequest) {
             images: {
               squareIcon: null,
               squareIconBg: null,
+              logoDominantColor: null,
               fullLogo: null,
               loginImage,
               dashboardImage,
@@ -301,30 +410,77 @@ export async function POST(request: NextRequest) {
             },
             accentPromotion: validatedColors.accentPromotion,
             diversityScore: diversity,
+            companyNameDebug: {
+              selectedName: companyNameResult.name,
+              candidates: companyNameResult.candidates.map((c) => ({
+                value: c.value,
+                source: c.source,
+                parentSource: c.parentSource,
+                score: c.score,
+                reasons: c.reasons,
+              })),
+            },
+            ogHeroEvaluation: {
+              ogImageUrl: ogHeroResult.ogImageUrl,
+              passed: ogHeroResult.passed,
+              score: ogHeroResult.score,
+            },
+            scrapedHeroEvaluation: scrapedHeroResult
+              ? {
+                  passed: scrapedHeroResult.passed,
+                  imageUrl: scrapedHeroResult.ogImageUrl,
+                  candidatesConsidered: scrapedHeroResult.candidatesConsidered,
+                  candidatesTried: scrapedHeroResult.candidatesTried,
+                  score: scrapedHeroResult.score,
+                }
+              : undefined,
           },
         })));
 
         // 8. Process images progressively
         let squareIcon: string | null = null;
         let squareIconBg: string | null = null;
+        let logoDominantColor: string | null = null;
         let fullLogo: string | null = null;
         let socialImage: string | null = null;
         let dalleImageUrl: string | null = null;
         let dalleGenerations: DalleGeneration[] = initialDalleGenerations;
 
-        // Process square icon + extract its dominant background
-        if (scrapedData.favicon) {
-          try {
-            squareIcon = await processSquareIcon(scrapedData.favicon);
+        // ── Brand mark selection: evaluate favicon + logo + manifest icons ──
+        let brandMarkSelection;
+        try {
+          brandMarkSelection = await selectBestBrandMark(
+            scrapedData.favicon,
+            scrapedData.logo,
+            scrapedData.manifestIcons
+          );
+
+          console.log(
+            `[brand-mark] ${domain} → ${brandMarkSelection.selected?.source ?? "initials"} ` +
+            `(score: ${brandMarkSelection.selected?.analysis?.totalScore ?? "N/A"}) ` +
+            `[${brandMarkSelection.log.join("; ")}]`
+          );
+
+          if (brandMarkSelection.selected) {
+            squareIcon = await processBrandMark(brandMarkSelection.selected);
             if (squareIcon) {
-              squareIconBg = await extractSquareIconBg(squareIcon);
+              [squareIconBg, logoDominantColor] = await Promise.all([
+                extractSquareIconBg(squareIcon),
+                extractLogoDominantColor(squareIcon),
+              ]);
+              console.log(
+                `[avatar-debug] ${domain} → squareIconBg: ${squareIconBg ?? "null"}, ` +
+                `logoDominantColor: ${logoDominantColor ?? "null"}, ` +
+                `accent: ${colors.accent}`
+              );
             }
-          } catch (error) {
-            console.error("Error processing square icon:", error);
           }
+        } catch (error) {
+          console.error("Error in brand mark selection:", error);
+          brandMarkSelection = null;
         }
 
-        // Process full logo
+        // Process full logo (still used for future screens / fullLogoUrl)
         if (scrapedData.logo) {
           try {
             fullLogo = await processFullLogo(scrapedData.logo);
@@ -333,16 +489,17 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // Send images event (favicon/logo processed)
+        // Send images event (brand mark + logo processed)
         controller.enqueue(encoder.encode(createSSEMessage({
           type: "images",
-          message: "Favicon and logo processed",
+          message: "Brand mark and logo processed",
           data: {
             companyName,
             colors,
             images: {
               squareIcon,
               squareIconBg,
+              logoDominantColor,
               fullLogo,
               loginImage,
               dashboardImage,
@@ -374,6 +531,7 @@ export async function POST(request: NextRequest) {
               images: {
                 squareIcon,
                 squareIconBg,
+                logoDominantColor,
                 fullLogo,
                 loginImage,
                 dashboardImage,
@@ -459,6 +617,7 @@ export async function POST(request: NextRequest) {
           images: {
             squareIcon,
             squareIconBg,
+            logoDominantColor,
             fullLogo,
             loginImage,
             dashboardImage,
@@ -466,6 +625,7 @@ export async function POST(request: NextRequest) {
             rawFaviconUrl: scrapedData.favicon,
             rawLogoUrl: scrapedData.logo,
           },
+          welcomeMessage: welcomeMsg.text,
         };
 
         const finalRawOutputs: RawOutputs = {
@@ -490,6 +650,7 @@ export async function POST(request: NextRequest) {
             originalColors: validatedColors.qualityGate.originalColors,
           },
           accentPromotion: validatedColors.accentPromotion,
+          welcomeMessageSource: welcomeMsg.source,
           disciplineDetection: {
             discipline: disciplineResult.discipline,
             confidence: disciplineResult.confidence,
@@ -506,6 +667,53 @@ export async function POST(request: NextRequest) {
           },
           gradientDebug: gradientDebugInfo,
           diversityScore: diversity,
+          companyNameDebug: {
+            selectedName: companyNameResult.name,
+            candidates: companyNameResult.candidates.map((c) => ({
+              value: c.value,
+              source: c.source,
+              parentSource: c.parentSource,
+              score: c.score,
+              reasons: c.reasons,
+            })),
+          },
+          brandMarkSelection: brandMarkSelection
+            ? {
+                candidates: brandMarkSelection.candidates.map((c) => ({
+                  url: c.url.startsWith("data:") ? `data:...${c.url.slice(-20)}` : c.url,
+                  source: c.source,
+                  totalScore: c.analysis?.totalScore ?? 0,
+                  scores: c.analysis?.scores ?? { aspect: 0, resolution: 0, complexity: 0, source: 0, monogram: 0 },
+                  disqualified: c.analysis?.disqualified ?? true,
+                  disqualifyReason: c.analysis?.disqualifyReason,
+                })),
+                selectedSource: brandMarkSelection.selected?.source ?? null,
+                fallbackToInitials: brandMarkSelection.fallbackToInitials,
+                log: brandMarkSelection.log,
+              }
+            : undefined,
+          ogHeroEvaluation: {
+            ogImageUrl: ogHeroResult.ogImageUrl,
+            passed: ogHeroResult.passed,
+            score: ogHeroResult.score,
+          },
+          scrapedHeroEvaluation: scrapedHeroResult
+            ? {
+                passed: scrapedHeroResult.passed,
+                imageUrl: scrapedHeroResult.ogImageUrl,
+                candidatesConsidered: scrapedHeroResult.candidatesConsidered,
+                candidatesTried: scrapedHeroResult.candidatesTried,
+                score: scrapedHeroResult.score,
+              }
+            : undefined,
+          parkedDomainDetection: scrapedData.parkedDomainSignals
+            ? {
+                isParked: scrapedData.isParkedDomain,
+                score: scrapedData.parkedDomainSignals.score,
+                threshold: scrapedData.parkedDomainSignals.threshold,
+                signals: scrapedData.parkedDomainSignals.signals,
+              }
+            : undefined,
         };
 
         controller.enqueue(encoder.encode(createSSEMessage({

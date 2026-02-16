@@ -171,8 +171,18 @@ function extractLargestPngFromIco(ico: Buffer): Buffer | null {
 /**
  * Extract the dominant background color from a processed squareIcon data URL.
  *
- * Samples the four corners of the 300×300 image.  If ≥ 3 corners share the
- * same colour (within a small tolerance) we treat that as the background.
+ * Samples 8 points around the image periphery — four corners plus four
+ * edge midpoints — on a 16×16 downscale.  This gives robust coverage
+ * for logos that are contain-fit into a larger transparent square (where
+ * corners alone might all be transparent).
+ *
+ * Selection logic:
+ *   1. Collect all 8 samples.
+ *   2. Separate opaque (alpha ≥ 200) from transparent samples.
+ *   3. If ALL 8 are transparent → null (no background).
+ *   4. Among opaque samples, cluster by colour similarity (Euclidean < 30).
+ *   5. If the largest cluster has ≥ 5 of 8 opaque samples → solid background.
+ *   6. Otherwise → null (gradient, multi-colour, or ambiguous).
  *
  * Returns a hex string like "#2c2c3e" or null when the background is
  * ambiguous / transparent.
@@ -185,25 +195,44 @@ export async function extractSquareIconBg(
     if (!base64Match) return null;
 
     const buffer = Buffer.from(base64Match[1], "base64");
+    const SIZE = 16;
     const { data, info } = await sharp(buffer)
-      .resize(10, 10, { fit: "fill" })
+      .resize(SIZE, SIZE, { fit: "fill" })
       .ensureAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
 
     const w = info.width;
+    const h = info.height;
     const ch = info.channels; // 4 (RGBA)
 
-    // Sample four corners
-    const corners = [
-      [0, 0],
-      [w - 1, 0],
-      [0, info.height - 1],
-      [w - 1, info.height - 1],
+    // Early exit for predominantly transparent icons.
+    // If ≥25% of the 16×16 grid is transparent, the icon has no solid
+    // background — return null to avoid extracting anti-aliasing artifacts.
+    let transparentCount = 0;
+    const totalPixels = w * h;
+    for (let i = 0; i < data.length; i += ch) {
+      if (data[i + 3] < 128) transparentCount++;
+    }
+    if (transparentCount / totalPixels >= 0.25) return null;
+
+    const mx = Math.floor(w / 2); // midpoint x
+    const my = Math.floor(h / 2); // midpoint y
+
+    // Sample 8 peripheral points: 4 corners + 4 edge midpoints
+    const samplePoints = [
+      [0, 0],           // top-left corner
+      [w - 1, 0],       // top-right corner
+      [0, h - 1],       // bottom-left corner
+      [w - 1, h - 1],   // bottom-right corner
+      [mx, 0],          // top-center
+      [mx, h - 1],      // bottom-center
+      [0, my],          // left-center
+      [w - 1, my],      // right-center
     ];
 
     const samples: { r: number; g: number; b: number; a: number }[] = [];
-    for (const [x, y] of corners) {
+    for (const [x, y] of samplePoints) {
       const idx = (y * w + x) * ch;
       samples.push({
         r: data[idx],
@@ -213,8 +242,11 @@ export async function extractSquareIconBg(
       });
     }
 
-    // Skip if any corner is transparent (alpha < 200)
-    if (samples.some(s => s.a < 200)) return null;
+    // Separate opaque from transparent.
+    // Threshold 100 (not 200) so rounded-corner anti-aliasing (alpha ~120)
+    // is still counted — these pixels carry valid background colour info.
+    const opaque = samples.filter(s => s.a >= 100);
+    if (opaque.length === 0) return null; // Fully transparent
 
     // Group by similarity (Euclidean distance < 30)
     const toHex = (s: { r: number; g: number; b: number }) =>
@@ -226,17 +258,17 @@ export async function extractSquareIconBg(
       b: { r: number; g: number; b: number }
     ) => Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
 
-    // Find the largest cluster of similar corners
-    let bestCluster: typeof samples = [];
-    for (let i = 0; i < samples.length; i++) {
-      const cluster = samples.filter(s => dist(s, samples[i]) < 30);
+    // Find the largest cluster of similar opaque samples
+    let bestCluster: typeof opaque = [];
+    for (let i = 0; i < opaque.length; i++) {
+      const cluster = opaque.filter(s => dist(s, opaque[i]) < 30);
       if (cluster.length > bestCluster.length) {
         bestCluster = cluster;
       }
     }
 
-    // Need at least 3 of 4 corners to agree
-    if (bestCluster.length < 3) return null;
+    // Need at least 5 of 8 points to agree (was 3/4 — now more robust)
+    if (bestCluster.length < 5) return null;
 
     // Average the cluster
     const avg = {
@@ -246,6 +278,92 @@ export async function extractSquareIconBg(
     };
 
     return toHex(avg);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the dominant non-transparent colour from a squareIcon data URL.
+ *
+ * This gives us the logo's primary foreground colour, which we can compare
+ * against a proposed background to ensure sufficient contrast.
+ *
+ * Algorithm:
+ *   1. Resize to 32×32 with alpha.
+ *   2. Collect every pixel whose alpha ≥ 200 (opaque foreground).
+ *   3. Quantise to 16-step buckets and find the most frequent colour.
+ *   4. If no opaque foreground pixels → return null.
+ *
+ * Returns a hex string like "#2055a4" or null.
+ */
+export async function extractLogoDominantColor(
+  dataUrl: string
+): Promise<string | null> {
+  try {
+    const base64Match = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+    if (!base64Match) return null;
+
+    const buffer = Buffer.from(base64Match[1], "base64");
+    const { data, info } = await sharp(buffer)
+      .resize(32, 32, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const ch = info.channels; // 4 (RGBA)
+    const step = 16;
+    const buckets = new Map<string, { r: number; g: number; b: number; count: number }>();
+
+    for (let i = 0; i < data.length; i += ch) {
+      const a = data[i + 3];
+      if (a < 200) continue; // skip transparent pixels
+
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      // Skip near-white and near-black (likely background remnants, not brand color)
+      const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (brightness > 240 || brightness < 15) continue;
+
+      const qr = Math.round(r / step) * step;
+      const qg = Math.round(g / step) * step;
+      const qb = Math.round(b / step) * step;
+      const key = `${qr},${qg},${qb}`;
+
+      const existing = buckets.get(key);
+      if (existing) {
+        existing.r += r;
+        existing.g += g;
+        existing.b += b;
+        existing.count++;
+      } else {
+        buckets.set(key, { r, g, b, count: 1 });
+      }
+    }
+
+    if (buckets.size === 0) return null;
+
+    // Find the most frequent bucket
+    let best: { r: number; g: number; b: number; count: number } | null = null;
+    for (const bucket of buckets.values()) {
+      if (!best || bucket.count > best.count) {
+        best = bucket;
+      }
+    }
+
+    if (!best || best.count < 5) return null; // Too few pixels → unreliable
+
+    // Average the accumulated values
+    const avgR = Math.round(best.r / best.count);
+    const avgG = Math.round(best.g / best.count);
+    const avgB = Math.round(best.b / best.count);
+
+    return (
+      "#" +
+      [avgR, avgG, avgB].map((c) => c.toString(16).padStart(2, "0")).join("")
+    );
   } catch {
     return null;
   }

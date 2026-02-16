@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { UrlInputForm } from "@/components/features/UrlInputForm";
 import { PortalPreview } from "@/components/portal/PortalPreview";
 import { LoginView } from "@/components/portal/LoginView";
@@ -16,6 +16,7 @@ const STATIC_BRANDING: PreviewBranding = {
   companyName: "Assembly",
   logoUrl: "/assets/icons/Brandmages logo (small inverse).svg",
   squareIconBg: null,
+  logoDominantColor: null,
   fullLogoUrl: null,
 };
 
@@ -25,16 +26,21 @@ const STATIC_THEME: PreviewTheme = {
   accent: "#3b82f6",
 };
 
-const STATIC_HERO_IMAGE = "/assets/Images/Rectangle 34624749.png";
+const STATIC_HERO_IMAGE = "/assets/Images/new.png";
 
-/* Card dimensions matching PortalPreview carousel cards */
-const STATIC_CARD_W = 660;
-const STATIC_CARD_H = 525;
 /* LoginView native inner size (from CARD_CONFIGS.login) */
 const LOGIN_INNER_W = 626;
 const LOGIN_INNER_H = 465;
 const LOGIN_PAD_TOP = 31;
 const LOGIN_PAD_LEFT = 34;
+/* The total "design" size — only left+top padding so content bleeds to right/bottom edges */
+const LOGIN_DESIGN_W = LOGIN_INNER_W + LOGIN_PAD_LEFT; // 660px
+const LOGIN_DESIGN_H = LOGIN_INNER_H + LOGIN_PAD_TOP; // 496px
+/* Maximum card dimensions on desktop */
+/* Max width derived from max height to ensure content fills edge-to-edge */
+const STATIC_CARD_MAX_H = 590;
+const STATIC_CARD_MAX_W = (STATIC_CARD_MAX_H / LOGIN_DESIGN_H) * LOGIN_DESIGN_W; // ~785px
+
 
 interface StreamEvent {
   type: "scraping" | "colors" | "images" | "dalle" | "dalle_progress" | "complete" | "error";
@@ -50,6 +56,33 @@ export default function Home() {
   const [portalData, setPortalData] = useState<PortalData | null>(null);
   const [rawOutputs, setRawOutputs] = useState<RawOutputs | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /* ─── Fluid scaling for desktop static hero card ─── */
+  const desktopCardRef = useRef<HTMLDivElement>(null);
+  const [containerW, setContainerW] = useState(STATIC_CARD_MAX_W);
+
+  useEffect(() => {
+    const el = desktopCardRef.current;
+    if (!el) return;
+
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
+        setContainerW(w);
+      }
+    });
+
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /* Scale based on width, but cap so height never exceeds STATIC_CARD_MAX_H */
+  const scaleFromW = containerW / LOGIN_DESIGN_W;
+  const scaleFromH = STATIC_CARD_MAX_H / LOGIN_DESIGN_H;
+  const fluidScale = Math.min(scaleFromW, scaleFromH);
+
+  /* Height follows the capped scale */
+  const fluidCardH = LOGIN_DESIGN_H * fluidScale;
 
   /** Transform pipeline output → preview payload (memoized) */
   const previewPayload = useMemo(
@@ -117,6 +150,7 @@ export default function Home() {
                   images: {
                     squareIcon: event.data?.images?.squareIcon ?? prev?.images?.squareIcon ?? null,
                     squareIconBg: event.data?.images?.squareIconBg ?? prev?.images?.squareIconBg ?? null,
+                    logoDominantColor: event.data?.images?.logoDominantColor ?? prev?.images?.logoDominantColor ?? null,
                     fullLogo: event.data?.images?.fullLogo ?? prev?.images?.fullLogo ?? null,
                     loginImage: event.data?.images?.loginImage ?? prev?.images?.loginImage ?? null,
                     dashboardImage: event.data?.images?.dashboardImage ?? prev?.images?.dashboardImage ?? null,
@@ -124,6 +158,7 @@ export default function Home() {
                     rawFaviconUrl: event.data?.images?.rawFaviconUrl ?? prev?.images?.rawFaviconUrl ?? null,
                     rawLogoUrl: event.data?.images?.rawLogoUrl ?? prev?.images?.rawLogoUrl ?? null,
                   },
+                  welcomeMessage: event.data?.welcomeMessage ?? prev?.welcomeMessage ?? "",
                 }));
               }
 
@@ -176,40 +211,34 @@ export default function Home() {
 
       {/* ─── Hero Section ─── */}
       <section
-        className="flex flex-col items-center"
-        style={{ padding: "var(--space-48) var(--space-40)", gap: "var(--space-48)" }}
+        className="flex flex-col items-center px-4 md:px-[var(--space-40)] pt-8 md:pt-[var(--space-48)] pb-8 md:pb-[var(--space-48)] gap-8 md:gap-[var(--space-48)]"
       >
         {/* Hero content: heading + subtitle + search */}
         <div
-          className="flex flex-col items-center text-center"
-          style={{ gap: "var(--space-40)", maxWidth: "832px" }}
+          className="flex flex-col items-center text-center w-full max-w-[832px]"
+          style={{ gap: "var(--space-40)" }}
         >
           {/* Text group */}
           <div className="flex flex-col items-center" style={{ gap: "var(--space-24)" }}>
             <h1
-              className="font-semibold"
+              className="font-semibold text-[clamp(2rem,5vw,var(--font-size-h1))]"
               style={{
-                fontSize: "var(--font-size-h1)",
-                lineHeight: "var(--line-height-h1)",
+                lineHeight: 1.1,
                 color: "var(--text-primary)",
-                maxWidth: "832px",
               }}
             >
-              Create a customized
-              <br />
-              white-labeled client portal
+              Create a customized{" "}
+              white&#8209;labeled client portal
             </h1>
             <p
+              className="max-w-[550px]"
               style={{
                 fontSize: "var(--font-size-body)",
                 lineHeight: "var(--line-height-body)",
                 color: "var(--text-secondary)",
-                maxWidth: "550px",
               }}
             >
-              Enter your work email or company website to
-              <br />
-              preview your branded client portal.
+              Enter your work email or company website to preview your branded client portal.
             </p>
           </div>
 
@@ -218,46 +247,21 @@ export default function Home() {
             onSubmit={handleSubmit}
             isLoading={isLoading}
             hasResult={!!portalData}
+            apiError={error}
+            onClearError={() => setError(null)}
           />
         </div>
 
-        {/* Status Message */}
-        {statusMessage && (
-          <div
-            className="flex items-center justify-center gap-2"
-            style={{ color: "var(--text-secondary)", fontSize: "var(--font-size-caption)" }}
-          >
-            <div
-              className="w-4 h-4 border-2 rounded-full animate-spin"
-              style={{ borderColor: "var(--border-default)", borderTopColor: "var(--text-secondary)" }}
-            />
-            {statusMessage}
-          </div>
-        )}
-
-        {/* Error Display */}
-        {error && (
-          <div
-            className="max-w-lg w-full p-4 rounded-[var(--radius-md)] text-sm"
-            style={{
-              backgroundColor: "#fef2f2",
-              border: "1px solid #fecaca",
-              color: "#dc2626",
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        {/* Static hero card — shown before any generation */}
+        {/* Static hero card — shown before any generation, fluid across all breakpoints */}
         {!isLoading && !previewPayload && (
           <div
-            className="overflow-hidden select-none pointer-events-none"
+            ref={desktopCardRef}
+            className="overflow-hidden select-none pointer-events-none w-full"
             style={{
-              width: `${STATIC_CARD_W}px`,
-              height: `${STATIC_CARD_H}px`,
+              maxWidth: `${STATIC_CARD_MAX_W}px`,
+              height: `${fluidCardH}px`,
               backgroundColor: "#F2F2E8",
-              borderRadius: "9px",
+              borderRadius: "8px",
               border: "1px solid #ECECE0",
             }}
           >
@@ -265,7 +269,7 @@ export default function Home() {
               style={{
                 width: `${LOGIN_INNER_W}px`,
                 height: `${LOGIN_INNER_H}px`,
-                transform: `translate(${LOGIN_PAD_LEFT}px, ${LOGIN_PAD_TOP}px)`,
+                transform: `translate(${LOGIN_PAD_LEFT * fluidScale}px, ${LOGIN_PAD_TOP * fluidScale}px) scale(${fluidScale})`,
                 transformOrigin: "top left",
               }}
             >
@@ -283,14 +287,14 @@ export default function Home() {
           <div className="w-full max-w-[1200px]">
             <PortalPreview
               payload={previewPayload}
-              isLoading={isLoading && !previewPayload}
+              isLoading={isLoading}
             />
           </div>
         )}
       </section>
 
       {/* ─── CTA Banner ─── */}
-      <section className="px-[var(--space-40)] pb-[var(--space-64)]">
+      <section className="px-4 md:px-[var(--space-40)] pb-[var(--space-64)]">
         <div className="max-w-[1360px] mx-auto">
           <CTABanner />
         </div>

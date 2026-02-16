@@ -16,7 +16,7 @@ export function CTABanner({ className }: { className?: string }) {
       className={cn(
         "relative overflow-hidden",
         "flex flex-col items-center justify-center",
-        "p-[var(--space-64)]",
+        "p-6 sm:p-10 md:p-[var(--space-64)]",
         "rounded-[var(--radius-lg)]",
         "text-center",
         className
@@ -32,7 +32,7 @@ export function CTABanner({ className }: { className?: string }) {
         <h2
           className="font-normal"
           style={{
-            fontSize: "var(--font-size-h2)",
+            fontSize: "clamp(24px, 5vw, var(--font-size-h2))",
             lineHeight: "var(--line-height-h2)",
             color: "var(--offwhite-100)",
           }}
@@ -48,15 +48,18 @@ export function CTABanner({ className }: { className?: string }) {
         >
           Try Assembly free for 14 days, no credit card required.
         </p>
-        <button
-          className="px-[var(--space-32)] py-[var(--space-12)] text-[var(--font-size-button)] font-semibold rounded-[var(--radius-full)] transition-all hover:opacity-90"
+        <a
+          href="https://dashboard.assembly.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-[var(--space-32)] py-[var(--space-12)] text-[var(--font-size-button)] font-semibold rounded-[var(--radius-full)] transition-all hover:opacity-90 inline-block"
           style={{
             backgroundColor: "var(--base-white)",
             color: "var(--text-primary)",
           }}
         >
           Complete setup
-        </button>
+        </a>
       </div>
     </section>
   );

@@ -1,10 +1,12 @@
 "use client";
 
-import { useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import type { GeneratedPreviewPayload } from "@/types/preview";
+import { useViewportWidth } from "@/hooks/useViewportWidth";
 import { LoginView } from "./LoginView";
 import { DashboardView } from "./DashboardView";
 import { MessagesView } from "./MessagesView";
+import { CardSkeleton } from "./CardSkeleton";
 
 interface PortalPreviewProps {
   payload: GeneratedPreviewPayload | null;
@@ -108,6 +110,66 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
   const autoplayResumeAt = useRef(0); // timestamp when autoplay resumed (for ease-in)
   const prefersReducedMotion = useRef(false);
 
+  /* ─── Responsive card scaling ─── */
+  const vw = useViewportWidth();
+  const MOBILE_PAD = 16; // px horizontal padding on each side
+  const cardScale = Math.min(1, (vw - 2 * MOBILE_PAD) / CARD_W);
+  const displayW = CARD_W * cardScale;
+  const displayH = CARD_H * cardScale;
+  const displaySpacing = displayW + CARD_GAP * cardScale;
+
+  // Store in refs so the 60fps renderFrame() can read them without re-renders
+  const displayWRef = useRef(displayW);
+  const displaySpacingRef = useRef(displaySpacing);
+  const cardScaleRef = useRef(cardScale);
+
+  useEffect(() => {
+    displayWRef.current = displayW;
+    displaySpacingRef.current = displaySpacing;
+    cardScaleRef.current = cardScale;
+  }, [displayW, displaySpacing, cardScale]);
+
+  /* ─── Image preloading — hold shimmer until images are cached ─── */
+  const [imagesReady, setImagesReady] = useState(false);
+
+  useEffect(() => {
+    // Wait until the SSE stream is fully done and payload exists
+    if (!payload || isLoading) {
+      setImagesReady(false);
+      return;
+    }
+
+    const urls = [
+      payload.images.loginHeroImageUrl,
+      payload.images.dashboardHeroImageUrl,
+      payload.branding.logoUrl,
+    ].filter((u): u is string => !!u);
+
+    if (urls.length === 0) {
+      setImagesReady(true);
+      return;
+    }
+
+    let cancelled = false;
+    Promise.all(
+      urls.map(
+        (src) =>
+          new Promise<void>((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve();
+            img.onerror = () => resolve(); // don't block on failures
+            img.src = src;
+          })
+      )
+    ).then(() => {
+      if (!cancelled) setImagesReady(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [payload, isLoading]);
+
   /* ─── Core animation loop ─── */
   const tick = useCallback(
     (time: number) => {
@@ -178,14 +240,19 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     if (!track || !viewport) return;
 
     const viewportW = viewport.offsetWidth;
-    const centerX = viewportW / 2 - CARD_W / 2;
+    const dw = displayWRef.current;
+    const ds = displaySpacingRef.current;
+    const sc = cardScaleRef.current;
+    const centerX = viewportW / 2 - dw / 2;
 
     for (let i = 0; i < track.children.length; i++) {
       const card = track.children[i] as HTMLElement;
       const d = shortestDelta(pos.current, i, N);
-      const x = centerX + d * SPACING;
+      const x = centerX + d * ds;
 
-      card.style.transform = `translate3d(${x}px, 0, 0)`;
+      // Position + scale: cards are 660×525 in DOM, visually scaled down on mobile
+      card.style.transform = `translate3d(${x}px, 0, 0) scale(${sc})`;
+      card.style.transformOrigin = "top left";
 
       // Opacity: centered card = 1, others fade
       const absDist = Math.abs(d);
@@ -224,17 +291,17 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     return () => cancelAnimationFrame(rafId.current);
   }, [tick]);
 
-  /* ─── Autoplay when payload arrives ─── */
+  /* ─── Autoplay when payload + images are ready ─── */
   useEffect(() => {
-    if (payload && !isLoading) {
+    if (payload && !isLoading && imagesReady) {
       pos.current = 0;
       vel.current = 0;
       if (!prefersReducedMotion.current) {
         autoplayActive.current = true;
         autoplayResumeAt.current = performance.now();
       }
-    } else if (isLoading) {
-      // During loading, no autoplay — static cards
+    } else if (isLoading || !imagesReady) {
+      // During loading or image preload — no autoplay, static cards
       autoplayActive.current = false;
       pos.current = 0;
       vel.current = 0;
@@ -244,7 +311,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     return () => {
       if (resumeTimer.current) clearTimeout(resumeTimer.current);
     };
-  }, [payload, isLoading]);
+  }, [payload, isLoading, imagesReady]);
 
   /* ─── Hover: pause / resume ─── */
   const handleMouseEnter = useCallback(() => {
@@ -287,8 +354,8 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     (e: React.PointerEvent) => {
       if (!isDragging.current) return;
       const dx = e.clientX - dragStartX.current;
-      // Convert px delta to position delta with drag resistance
-      const posDelta = (-dx / SPACING) * DRAG_RESISTANCE;
+      // Convert px delta to position delta with drag resistance (responsive spacing)
+      const posDelta = (-dx / displaySpacingRef.current) * DRAG_RESISTANCE;
       pos.current = wrap(dragStartPos.current + posDelta, N);
     },
     []
@@ -307,7 +374,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       }
 
       const dx = e.clientX - dragStartX.current;
-      vel.current = (-dx / SPACING) * 2;
+      vel.current = (-dx / displaySpacingRef.current) * 2;
       vel.current = Math.max(-MAX_FLICK_VEL, Math.min(MAX_FLICK_VEL, vel.current));
     },
     []
@@ -335,14 +402,14 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      {/* Carousel viewport — full-width breakout */}
+      {/* Carousel viewport — full-width breakout, responsive height */}
       <div
         ref={viewportRef}
         className="overflow-hidden"
         style={{
           width: "100vw",
           marginLeft: "calc(50% - 50vw)",
-          height: `${CARD_H}px`,
+          height: `${displayH}px`,
           cursor: isDragging.current ? "grabbing" : "grab",
           touchAction: "pan-y",
         }}
@@ -355,7 +422,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
         <div
           ref={trackRef}
           className="relative w-full"
-          style={{ height: `${CARD_H}px` }}
+          style={{ height: `${displayH}px` }}
         >
           {SCREENS.map((screen, i) => {
             const cfg = CARD_CONFIGS[screen.id as keyof typeof CARD_CONFIGS];
@@ -374,8 +441,11 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
                   willChange: "transform, opacity",
                 }}
               >
-                {/* Content renders only when payload is ready */}
-                {!isLoading && payload && (
+                {/* Shimmer: shown during generation + image preloading */}
+                {(isLoading || !imagesReady) && <CardSkeleton />}
+
+                {/* Content: only when payload ready AND images preloaded */}
+                {!isLoading && payload && imagesReady && (
                   <div
                     className="pointer-events-auto"
                     style={{

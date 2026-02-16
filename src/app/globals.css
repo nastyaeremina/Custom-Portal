@@ -145,3 +145,21 @@ body {
 html {
   scroll-behavior: smooth;
 }
+
+/* ============================
+   SHIMMER — loading card overlay
+   ============================ */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.18) 50%,
+    transparent 100%
+  );
+  animation: shimmer 2.5s ease-in-out infinite;
+}

@@ -1,5 +1,5 @@
 import { Page } from "puppeteer";
-import { ScrapedImage } from "./types";
+import { CompanyNameCandidate, ParkedDomainSignals, ScrapedImage } from "./types";
 
 export async function extractFavicon(page: Page): Promise<string | null> {
   // Collect ALL candidate URLs from the DOM (ordered by preference)
@@ -201,16 +201,50 @@ export async function extractLogo(page: Page): Promise<string | null> {
       return rect.top;
     };
 
-    // Strategy 1: Look for the logo link in header (usually wraps the logo)
-    const headerLogoLinks = document.querySelectorAll(
-      'header a[href="/"], header a[href="./"], header a[class*="logo" i], header a[id*="logo" i], nav a[href="/"], nav a[href="./"]'
-    );
+    // Check if an image is logo-sized: loaded (naturalWidth > 15) and
+    // displayed at a reasonable logo size (rendered width < 500px).
+    // We use rendered width for the upper bound because modern sites
+    // serve @2x/@3x images with naturalWidth 2-4x the display size
+    // (e.g. Next.js /_next/image serves a 200px logo at naturalWidth 1938px).
+    const isLogoSized = (img: HTMLImageElement): boolean => {
+      if (img.naturalWidth <= 15) return false;
+      const rendered = img.getBoundingClientRect().width;
+      return rendered > 0 && rendered < 500;
+    };
+
+    // Helper: check if a link points to the site's home page.
+    // Many sites use href="/" but some (especially Wix) use the full
+    // origin URL like href="https://www.sbmmedia.au".
+    const origin = window.location.origin; // e.g. "https://www.sbmmedia.au"
+    const isHomeLink = (a: Element): boolean => {
+      const href = a.getAttribute("href");
+      if (!href) return false;
+      if (href === "/" || href === "./") return true;
+      // Match full origin with optional trailing slash
+      try {
+        const resolved = new URL(href, origin);
+        return resolved.origin === origin && (resolved.pathname === "/" || resolved.pathname === "");
+      } catch {
+        return false;
+      }
+    };
+
+    // Collect all home-pointing links inside header/nav for Strategy 1
+    const headerNavEls = document.querySelectorAll("header, nav");
+    const headerLogoLinks: Element[] = [];
+    headerNavEls.forEach((container) => {
+      container.querySelectorAll("a").forEach((a) => {
+        if (isHomeLink(a) || /logo/i.test(a.className) || /logo/i.test(a.id)) {
+          headerLogoLinks.push(a);
+        }
+      });
+    });
 
     headerLogoLinks.forEach((link) => {
       const img = link.querySelector("img");
       if (img) {
         const imgEl = img as HTMLImageElement;
-        if (imgEl.src && imgEl.naturalWidth > 15 && imgEl.naturalWidth < 500) {
+        if (imgEl.src && isLogoSized(imgEl)) {
           if (!isInCustomerSection(imgEl)) {
             candidates.push({ src: imgEl.src, score: 25 }); // Highest score
           }
@@ -225,7 +259,7 @@ export async function extractLogo(page: Page): Promise<string | null> {
 
     explicitLogoImages.forEach((img) => {
       const imgEl = img as HTMLImageElement;
-      if (imgEl.src && imgEl.naturalWidth > 15 && imgEl.naturalWidth < 500) {
+      if (imgEl.src && isLogoSized(imgEl)) {
         if (isInCustomerSection(imgEl)) {
           // Skip customer logos entirely
           return;
@@ -255,11 +289,26 @@ export async function extractLogo(page: Page): Promise<string | null> {
       const headerImages = header.querySelectorAll(":scope > img, :scope > a > img, :scope > div > img, :scope > div > a > img");
       headerImages.forEach((img, index) => {
         const imgEl = img as HTMLImageElement;
-        if (imgEl.src && imgEl.naturalWidth > 15 && imgEl.naturalWidth < 500) {
+        if (imgEl.src && isLogoSized(imgEl)) {
           if (!isInCustomerSection(imgEl)) {
             // First image in header gets higher score
             candidates.push({ src: imgEl.src, score: 12 - index });
           }
+        }
+      });
+
+      // Strategy 3b: Images inside home-pointing links anywhere in header.
+      // Wix and other builders nest logos deeply (header > div > div > a > img).
+      // The shallow selectors above miss these, so fall back to finding any
+      // <a> in the header that points home and contains an <img>.
+      header.querySelectorAll("a").forEach((a) => {
+        if (!isHomeLink(a)) return;
+        const img = a.querySelector("img") as HTMLImageElement | null;
+        if (img && img.src && isLogoSized(img) && !isInCustomerSection(img)) {
+          let score = 20;
+          if (getVerticalPosition(img) < 150) score += 3;
+          if (isLikelyMainLogo(img)) score += 3;
+          candidates.push({ src: img.src, score });
         }
       });
     }
@@ -281,8 +330,7 @@ export async function extractLogo(page: Page): Promise<string | null> {
 
       if (
         srcLower.includes("logo") &&
-        imgEl.naturalWidth > 15 &&
-        imgEl.naturalWidth < 500
+        isLogoSized(imgEl)
       ) {
         let score = 8;
         if (getVerticalPosition(imgEl) < 150) score += 2;
@@ -292,7 +340,8 @@ export async function extractLogo(page: Page): Promise<string | null> {
 
     // Strategy 5: SVG in home links at the top of the page (highest priority for sites without header/nav)
     // This catches sites like assembly.com that use div-based navigation
-    const homeLinks = document.querySelectorAll('a[href="/"], a[href="./"]');
+    const allLinks = document.querySelectorAll("a");
+    const homeLinks = Array.from(allLinks).filter(isHomeLink);
     homeLinks.forEach((link) => {
       const linkRect = link.getBoundingClientRect();
       // Only consider links near the top of the page (likely navigation)
@@ -318,7 +367,7 @@ export async function extractLogo(page: Page): Promise<string | null> {
 
       // Also check for img in home links at top
       const img = link.querySelector("img") as HTMLImageElement | null;
-      if (img && img.src && img.naturalWidth > 15 && img.naturalWidth < 500) {
+      if (img && img.src && isLogoSized(img)) {
         if (!isInCustomerSection(img)) {
           let score = 28;
           if (linkRect.top < 100) score += 5;
@@ -370,6 +419,26 @@ export async function extractLogo(page: Page): Promise<string | null> {
       });
     });
 
+    // Strategy 6b: SVG inside home-pointing links in header/nav (any depth).
+    // CSS selectors above can't match full-URL hrefs like "https://site.com",
+    // so we programmatically find home links and check for SVGs.
+    headerNav.forEach((container) => {
+      container.querySelectorAll("a").forEach((a) => {
+        if (!isHomeLink(a)) return;
+        const svg = a.querySelector("svg") as SVGSVGElement | null;
+        if (!svg || isInCustomerSection(svg)) return;
+        const bbox = svg.getBoundingClientRect();
+        if (bbox.width < 20 || bbox.width > 500) return;
+        if (bbox.height < 10 || bbox.height > 200) return;
+        const dataUrl = svgToDataUrl(svg);
+        if (dataUrl) {
+          let score = 22;
+          if (getVerticalPosition(svg) < 150) score += 3;
+          candidates.push({ src: dataUrl, score });
+        }
+      });
+    });
+
     // Strategy 7: Any SVG with logo in class/id (not in customer section)
     const logoSvgs = document.querySelectorAll(
       'svg[class*="logo" i], svg[id*="logo" i], [class*="logo" i] > svg, [id*="logo" i] > svg'
@@ -404,6 +473,99 @@ export async function extractLogo(page: Page): Promise<string | null> {
   });
 
   return logoUrl;
+}
+
+/**
+ * Extract data from the Web App Manifest (manifest.json).
+ *
+ * Returns:
+ *   - icons: up to 3 absolute URLs of high-quality icons (≥ 128 px), largest first
+ *   - name: `manifest.name` (the full app name)
+ *   - shortName: `manifest.short_name` (abbreviated app name)
+ *
+ * Both name fields are useful company-name candidates (trust: "manifest").
+ */
+export interface ManifestData {
+  icons: string[];
+  name: string | null;
+  shortName: string | null;
+}
+
+export async function extractManifestData(page: Page): Promise<ManifestData> {
+  const empty: ManifestData = { icons: [], name: null, shortName: null };
+
+  const manifestHref = await page.evaluate(() => {
+    const link = document.querySelector('link[rel="manifest"]');
+    return link?.getAttribute("href") || null;
+  });
+
+  if (!manifestHref) return empty;
+
+  const pageUrl = page.url();
+  let manifestUrl: string;
+  try {
+    manifestUrl = new URL(manifestHref, pageUrl).href;
+  } catch {
+    return empty;
+  }
+
+  try {
+    const response = await fetch(manifestUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)" },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return empty;
+
+    const manifest = await response.json();
+
+    // ── Name fields ────────────────────────────────────────────────
+    const name = typeof manifest.name === "string" ? manifest.name.trim() || null : null;
+    const shortName =
+      typeof manifest.short_name === "string" ? manifest.short_name.trim() || null : null;
+
+    // ── Icons ──────────────────────────────────────────────────────
+    if (!manifest.icons || !Array.isArray(manifest.icons)) {
+      return { icons: [], name, shortName };
+    }
+
+    // Parse size string like "192x192" into a number
+    const parseSize = (sizes?: string): number => {
+      if (!sizes) return 0;
+      const match = sizes.match(/(\d+)x(\d+)/);
+      if (!match) return 0;
+      return Math.max(parseInt(match[1], 10), parseInt(match[2], 10));
+    };
+
+    const candidates: Array<{ url: string; size: number }> = [];
+
+    for (const icon of manifest.icons) {
+      if (!icon.src) continue;
+
+      const size = parseSize(icon.sizes);
+      // Only keep icons >= 128px (skip tiny ones)
+      if (size < 128) continue;
+
+      // Accept image/png, image/svg+xml, or unspecified type
+      const type = (icon.type || "").toLowerCase();
+      if (type && !type.startsWith("image/png") && !type.startsWith("image/svg")) continue;
+
+      try {
+        const absoluteUrl = new URL(icon.src, manifestUrl).href;
+        candidates.push({ url: absoluteUrl, size });
+      } catch {
+        // skip malformed URL
+      }
+    }
+
+    // Sort largest first, return up to 3
+    candidates.sort((a, b) => b.size - a.size);
+    const icons = candidates.slice(0, 3).map((c) => c.url);
+
+    return { icons, name, shortName };
+  } catch {
+    // Network error, JSON parse error, timeout
+    return empty;
+  }
 }
 
 export async function extractOgImage(page: Page): Promise<string | null> {
@@ -754,4 +916,416 @@ export async function extractMetadata(
 
     return { title, description, meta };
   });
+}
+
+/**
+ * Collect company-name candidates from multiple DOM sources.
+ *
+ * Each candidate carries a `source` tag so the downstream scoring
+ * system can assign trust-based weights.  All values are trimmed and
+ * truncated to 200 chars.  Duplicates (same value+source) are removed.
+ *
+ * Sources gathered (in rough trust order):
+ *   1. Schema.org LD+JSON  → Organization / WebSite `name`
+ *   2. og:site_name        → meta[property="og:site_name"]
+ *   3. application-name    → meta[name="application-name"]
+ *   4. header brand text   → textContent of first <a href="/"> in <header>/<nav>
+ *   5. logo alt text       → alt of first logo-like <img> in header/nav
+ *   6. og:title            → meta[property="og:title"]
+ *   7. title               → document.title
+ */
+export async function extractCompanyNameCandidates(
+  page: Page
+): Promise<CompanyNameCandidate[]> {
+  try {
+    const raw = await page.evaluate(() => {
+      const candidates: Array<{ value: string; source: string; parentSource?: string }> = [];
+
+      const add = (value: string | null | undefined, source: string) => {
+        if (!value) return;
+        const trimmed = value.trim().substring(0, 200);
+        if (trimmed.length === 0) return;
+        candidates.push({ value: trimmed, source });
+      };
+
+      // ── 1. Schema.org LD+JSON ──────────────────────────────────────
+      try {
+        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+        scripts.forEach((script) => {
+          try {
+            const json = JSON.parse(script.textContent || "");
+
+            // Handle @graph arrays and single objects
+            const items = Array.isArray(json)
+              ? json
+              : json?.["@graph"] && Array.isArray(json["@graph"])
+                ? json["@graph"]
+                : [json];
+
+            for (const item of items) {
+              if (!item) continue;
+              const type = item["@type"];
+              // Accept Organization, Corporation, WebSite, LocalBusiness, etc.
+              const isRelevant =
+                typeof type === "string" &&
+                /^(Organization|Corporation|WebSite|LocalBusiness|Store|Restaurant|MedicalBusiness|EducationalOrganization|GovernmentOrganization|NGO|SportsOrganization)$/i.test(type);
+
+              if (isRelevant && typeof item.name === "string") {
+                add(item.name, "schema-org");
+              }
+
+              // Also check publisher.name (common in Article schemas)
+              if (item.publisher && typeof item.publisher.name === "string") {
+                add(item.publisher.name, "schema-org");
+              }
+            }
+          } catch {
+            // Invalid JSON — skip this script tag
+          }
+        });
+      } catch {
+        // querySelectorAll failed — skip schema.org
+      }
+
+      // ── 2. og:site_name ────────────────────────────────────────────
+      const ogSiteName = document
+        .querySelector('meta[property="og:site_name"]')
+        ?.getAttribute("content");
+      add(ogSiteName, "og:site_name");
+
+      // ── 3. application-name ────────────────────────────────────────
+      const appName = document
+        .querySelector('meta[name="application-name"]')
+        ?.getAttribute("content");
+      add(appName, "application-name");
+
+      // ── 4. Header brand text ───────────────────────────────────────
+      // Look for the first <a> that links to "/" or the site root inside
+      // <header> or <nav>.  Its textContent is often the brand name.
+      try {
+        // Common navigation labels that are never a company name.
+        // Checked against header-brand candidates to avoid picking up
+        // generic nav items (especially on Webflow/portfolio sites).
+        const NAV_WORDS = new Set([
+          "work", "works", "home", "about", "contact", "blog", "news",
+          "portfolio", "projects", "services", "products", "pricing",
+          "faq", "careers", "jobs", "team", "login", "sign in", "sign up",
+          "register", "shop", "store", "help", "support", "menu",
+          "resources", "gallery", "events", "testimonials", "reviews",
+          "case studies", "clients",
+        ]);
+
+        const headerNav = document.querySelector("header") || document.querySelector("nav");
+        if (headerNav) {
+          const hbOrigin = window.location.origin;
+          const allHbLinks = headerNav.querySelectorAll("a");
+          const homeLinks = Array.from(allHbLinks).filter((a) => {
+            const href = a.getAttribute("href");
+            if (!href) return false;
+            if (href === "/" || href === "./") return true;
+            try {
+              const resolved = new URL(href, hbOrigin);
+              return resolved.origin === hbOrigin && (resolved.pathname === "/" || resolved.pathname === "");
+            } catch { return false; }
+          });
+          for (const link of homeLinks) {
+            let text = (link as HTMLElement).textContent?.trim() || "";
+            if (text.length < 2 || text.length > 100) continue;
+
+            // Collapse whitespace for cleaner matching
+            text = text.replace(/\s+/g, " ");
+
+            // Webflow hover-swap pattern: link text is duplicated for
+            // hover animations.  Two variants:
+            //   1. With space:  "Work Work" (textContent of two inline elements)
+            //   2. Without space: "WorkWork"  (textContent of two <p>/<div> elements)
+            const spaceWords = text.split(" ");
+            if (spaceWords.length === 2 && spaceWords[0].toLowerCase() === spaceWords[1].toLowerCase()) {
+              text = spaceWords[0];
+            }
+            // Check for concatenated duplicate (e.g. "WorkWork" → "Work")
+            if (spaceWords.length === 1 && text.length >= 4 && text.length % 2 === 0) {
+              const half = text.length / 2;
+              const first = text.substring(0, half);
+              const second = text.substring(half);
+              if (first.toLowerCase() === second.toLowerCase()) {
+                text = first;
+              }
+            }
+
+            // Skip generic navigation labels
+            if (NAV_WORDS.has(text.toLowerCase())) continue;
+
+            add(text, "header-brand");
+            break; // Only take the first valid one
+          }
+        }
+      } catch {
+        // Skip header brand extraction
+      }
+
+      // ── 5. Logo alt text ───────────────────────────────────────────
+      // Find first <img> in header/nav whose class/id/alt hints at "logo".
+      try {
+        const headerNav = document.querySelector("header") || document.querySelector("nav");
+        if (headerNav) {
+          const imgs = headerNav.querySelectorAll("img");
+          for (const img of imgs) {
+            const alt = img.getAttribute("alt") || "";
+            const cls = img.className || "";
+            const id = img.id || "";
+            const src = img.getAttribute("src") || "";
+            const isLogoImg =
+              /logo/i.test(alt) || /logo/i.test(cls) || /logo/i.test(id) || /logo/i.test(src);
+
+            if (isLogoImg) {
+              // Skip generic values like "logo", "company logo", "site logo"
+              const cleaned = alt.replace(/\s*(logo|icon|image|img)\s*/gi, "").trim();
+              if (cleaned.length >= 2) {
+                add(cleaned, "logo-alt");
+                break;
+              }
+            }
+          }
+        }
+      } catch {
+        // Skip logo alt extraction
+      }
+
+      // ── 6. og:title ───────────────────────────────────────────────
+      const ogTitle = document
+        .querySelector('meta[property="og:title"]')
+        ?.getAttribute("content");
+      add(ogTitle, "og:title");
+
+      // ── 7. document.title ──────────────────────────────────────────
+      if (document.title) {
+        add(document.title, "title");
+      }
+
+      // ── Deduplicate (same value + source) ──────────────────────────
+      const seen = new Set<string>();
+      const deduped: Array<{ value: string; source: string }> = [];
+      for (const c of candidates) {
+        const key = `${c.source}::${c.value}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          deduped.push(c);
+        }
+      }
+
+      return deduped;
+    });
+    // Cast: page.evaluate returns plain objects with string source,
+    // but we know the values match CompanyNameSource literals.
+    return raw as CompanyNameCandidate[];
+  } catch (error) {
+    console.warn("extractCompanyNameCandidates failed:", error);
+    return [];
+  }
+}
+
+// ─── Parked / Placeholder Domain Detection ────────────────────────────
+
+/**
+ * Known hosting/registrar brand names.  If any of these appear in the page
+ * title or body AND the input domain does NOT contain the same string,
+ * the page is very likely a hosting placeholder.
+ */
+const HOSTING_PROVIDERS = [
+  "websupport", "godaddy", "namecheap", "bluehost", "hostgator",
+  "siteground", "dreamhost", "ionos", "hostinger", "wix",
+  "squarespace", "wordpress.com", "weebly",
+  "plesk", "cpanel", "directadmin", "cloudflare",
+  "sedoparking", "hugedomains", "dan.com", "afternic",
+  "1and1", "register.com", "name.com", "hover",
+  "networksolutions", "enom", "tucows", "domain.com",
+  "fasthosts", "123-reg", "one.com", "strato",
+  "ovh", "hetzner", "contabo", "linode",
+  "parking", "parked",
+];
+
+/**
+ * Regex patterns that strongly indicate a parked / placeholder page.
+ * Each match adds PARKED_PHRASE_SCORE to the total.
+ */
+const PARKED_PHRASES: RegExp[] = [
+  /this\s+domain\s+(is|has\s+been)\s+(parked|registered)/i,
+  /domain\s+(is\s+)?for\s+sale/i,
+  /buy\s+this\s+domain/i,
+  /domain\s+owner/i,
+  /this\s+web(site|page)?\s+is\s+(under\s+construction|coming\s+soon)/i,
+  /parked\s+(by|domain|page|free)/i,
+  /future\s+home\s+of/i,
+  /website\s+coming\s+soon/i,
+  /nothing\s+(to\s+see\s+)?here\s+yet/i,
+  /site\s+not\s+(yet\s+)?available/i,
+  /web\s+hosting\s+placeholder/i,
+  /congratulations.*new\s+domain/i,
+  /your\s+new\s+site/i,
+  /get\s+started\s+with\s+(your\s+)?website/i,
+  /this\s+is\s+a\s+default\s+(page|website)/i,
+  /set\s+up\s+a\s+new\s+domain/i,
+  /no\s+content\s+is\s+displayed/i,
+  /upload\/?delete\s+the\s+existing\s+content/i,
+];
+
+// Score constants
+const HOSTING_PROVIDER_SCORE = 40;
+const PARKED_PHRASE_SCORE = 25;
+const SPARSE_CONTENT_SCORE = 30;
+const DOMAIN_MISMATCH_SCORE = 35;
+const DEFAULT_PAGE_MARKER_SCORE = 20;
+const PARKED_THRESHOLD = 50;
+
+export interface ParkedDomainResult {
+  isParked: boolean;
+  score: number;
+  threshold: number;
+  signals: string[];
+}
+
+/**
+ * Detect whether the current page is a hosting-provider placeholder
+ * (parked domain) rather than the actual company's website.
+ *
+ * Uses a weighted scoring system — multiple weak signals or one strong
+ * signal is required to flag the page, minimising false positives.
+ */
+export async function detectParkedDomain(
+  page: Page,
+  inputUrl: string
+): Promise<ParkedDomainResult> {
+  const signals: string[] = [];
+  let score = 0;
+
+  // ── Extract all page data in a single evaluate round-trip ──
+  const pageData = await page.evaluate(() => {
+    const title = document.title || "";
+    const metaDesc =
+      document.querySelector('meta[name="description"]')?.getAttribute("content") || "";
+    const metaGenerator =
+      document.querySelector('meta[name="generator"]')?.getAttribute("content") || "";
+    const ogSiteName =
+      document.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "";
+
+    // Visible body text (first 3000 chars to keep it fast)
+    const bodyText = (document.body?.innerText || "").substring(0, 3000);
+
+    // Check for parking-specific selectors
+    const hasParkingSelectors = !!(
+      document.querySelector('[class*="parking" i]') ||
+      document.querySelector('[class*="placeholder" i]') ||
+      document.querySelector('[id*="parking" i]') ||
+      document.querySelector('[id*="placeholder" i]')
+    );
+
+    // Check for cpanel / plesk generator tags
+    const hasCpanelPlesk = !!(
+      document.querySelector('meta[name="generator"][content*="plesk" i]') ||
+      document.querySelector('meta[name="generator"][content*="cpanel" i]')
+    );
+
+    return {
+      title,
+      metaDesc,
+      metaGenerator,
+      ogSiteName,
+      bodyText,
+      hasParkingSelectors,
+      hasCpanelPlesk,
+    };
+  });
+
+  // ── Derive the domain stem for mismatch checks ──
+  let domainStem = "";
+  try {
+    domainStem = new URL(inputUrl).hostname
+      .replace(/^www\./, "")
+      .split(".")[0]
+      .toLowerCase();
+  } catch {
+    /* ignore bad URL */
+  }
+
+  // Combine all text sources for provider search
+  const allText = [
+    pageData.title,
+    pageData.metaDesc,
+    pageData.metaGenerator,
+    pageData.ogSiteName,
+    pageData.bodyText,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  // ── Signal A: Known hosting provider in page text ──
+  const matchedProviders: string[] = [];
+  for (const provider of HOSTING_PROVIDERS) {
+    if (allText.includes(provider)) {
+      // Check that the domain itself does NOT contain the provider name
+      // (avoids flagging godaddy.com as parked)
+      if (!domainStem.includes(provider.replace(/\./g, ""))) {
+        matchedProviders.push(provider);
+      }
+    }
+  }
+  if (matchedProviders.length > 0) {
+    score += HOSTING_PROVIDER_SCORE;
+    signals.push(`hosting-provider: ${matchedProviders.join(", ")}`);
+  }
+
+  // ── Signal B: Parked keyword phrases ──
+  const matchedPhrases: string[] = [];
+  for (const re of PARKED_PHRASES) {
+    if (re.test(pageData.bodyText) || re.test(pageData.title)) {
+      matchedPhrases.push(re.source.substring(0, 40));
+    }
+  }
+  if (matchedPhrases.length > 0) {
+    // Only add the score once (not per phrase) to avoid over-weighting
+    score += PARKED_PHRASE_SCORE;
+    signals.push(`parked-phrases: ${matchedPhrases.length} match(es)`);
+  }
+
+  // ── Signal C: Sparse content ──
+  const visibleText = pageData.bodyText.replace(/\s+/g, "");
+  if (visibleText.length < 200) {
+    score += SPARSE_CONTENT_SCORE;
+    signals.push(`sparse-content: ${visibleText.length} chars`);
+  }
+
+  // ── Signal D: Domain-name mismatch with hosting provider ──
+  // The page title or og:site_name is a known provider AND has zero
+  // overlap with the domain stem.
+  if (domainStem.length >= 3) {
+    const titleLower = pageData.title.toLowerCase();
+    const ogNameLower = pageData.ogSiteName.toLowerCase();
+    const titleOrOg = titleLower + " " + ogNameLower;
+
+    const titleIsProvider = HOSTING_PROVIDERS.some((p) => titleOrOg.includes(p));
+    const domainInTitle = titleOrOg.includes(domainStem);
+
+    if (titleIsProvider && !domainInTitle) {
+      score += DOMAIN_MISMATCH_SCORE;
+      signals.push(`domain-mismatch: title/og has provider, no "${domainStem}"`);
+    }
+  }
+
+  // ── Signal E: Default-page HTML markers ──
+  if (pageData.hasParkingSelectors || pageData.hasCpanelPlesk) {
+    score += DEFAULT_PAGE_MARKER_SCORE;
+    const markers = [
+      pageData.hasParkingSelectors && "parking/placeholder selectors",
+      pageData.hasCpanelPlesk && "cpanel/plesk generator",
+    ].filter(Boolean);
+    signals.push(`html-markers: ${markers.join(", ")}`);
+  }
+
+  return {
+    isParked: score >= PARKED_THRESHOLD,
+    score,
+    threshold: PARKED_THRESHOLD,
+    signals,
+  };
 }

@@ -2,18 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { GenerateRequestSchema, GenerateResponse, PortalData, RawOutputs } from "@/types/api";
 import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
-import { cleanCompanyName } from "@/lib/utils/company-name";
+import { selectCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
 import { generateValidatedColorScheme, selectAccentColorWithContext, selectSidebarColors } from "@/lib/colors/generator";
 import {
   processSquareIcon,
   extractSquareIconBg,
+  extractLogoDominantColor,
   processFullLogo,
   processLoginImage,
   processSocialImage,
 } from "@/lib/images/processor";
 import { isOpenAIConfigured, generateGradientImagePublic, extractColorsFromScrapedImages, type GradientDebug } from "@/lib/images/dalle";
 import { detectDiscipline, selectHeroImage } from "@/lib/discipline";
+import { evaluateOgHero, evaluateScrapedHeroes, type ScrapedHeroEvaluation } from "@/lib/images/og-hero-scorer";
+import { generateWelcomeMessage } from "@/lib/welcome-message";
 
 export const maxDuration = 60; // Allow up to 60 seconds
 
@@ -99,23 +102,69 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       `(${heroSelection.reason})`
     );
 
+    // ── OG hero evaluation ──────────────────────────────────────────
+    const ogHeroResult = await evaluateOgHero(scrapedData.ogImage);
+
+    // Extract domain for debug logging
+    let domain = "unknown";
+    try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+
+    console.log(
+      `[og-hero] ${domain} → ${ogHeroResult.passed ? "PASS" : "FAIL"} ` +
+        `(${ogHeroResult.score ? `total=${ogHeroResult.score.total}, ${ogHeroResult.score.reasons.join("; ")}` : "no OG image"})`
+    );
+
+    // ── Scraped hero fallback (only when OG image failed) ─────────────
+    let scrapedHeroResult: ScrapedHeroEvaluation | null = null;
+
+    if (!ogHeroResult.passed) {
+      scrapedHeroResult = await evaluateScrapedHeroes(
+        scrapedData.images,
+        scrapedData.ogImage
+      );
+
+      console.log(
+        `[scraped-hero] ${domain} → ${scrapedHeroResult.passed ? "PASS" : "FAIL"} ` +
+          `(considered: ${scrapedHeroResult.candidatesConsidered}, tried: ${scrapedHeroResult.candidatesTried}` +
+          `${scrapedHeroResult.score ? `, total=${scrapedHeroResult.score.total}` : ""})`
+      );
+    }
+
     // 8. Process images
     let squareIcon: string | null = null;
     let squareIconBg: string | null = null;
+    let logoDominantColor: string | null = null;
     let fullLogo: string | null = null;
     let socialImage: string | null = null;
     let dalleImageUrl: string | null = null;
 
-    // Login image: library takes priority, gradient is fallback
-    let loginImage: string | null = heroSelection.selected ? heroSelection.imageUrl : null;
-    let loginImageSource: string = heroSelection.selected ? "library" : "gradient";
+    // Login image: website OG > scraped heroes > discipline library > gradient
+    let loginImage: string | null = null;
+    let loginImageSource: string;
+
+    if (ogHeroResult.passed && ogHeroResult.processedImageDataUrl) {
+      loginImage = ogHeroResult.processedImageDataUrl;
+      loginImageSource = "website";
+    } else if (scrapedHeroResult?.passed && scrapedHeroResult.processedImageDataUrl) {
+      loginImage = scrapedHeroResult.processedImageDataUrl;
+      loginImageSource = "website";
+    } else if (heroSelection.selected) {
+      loginImage = heroSelection.imageUrl;
+      loginImageSource = "discipline";
+    } else {
+      loginImage = null; // filled by gradient later
+      loginImageSource = "gradient";
+    }
 
     // Process square icon (from favicon) + extract dominant background
     if (scrapedData.favicon) {
       try {
         squareIcon = await processSquareIcon(scrapedData.favicon);
         if (squareIcon) {
-          squareIconBg = await extractSquareIconBg(squareIcon);
+          [squareIconBg, logoDominantColor] = await Promise.all([
+            extractSquareIconBg(squareIcon),
+            extractLogoDominantColor(squareIcon),
+          ]);
         }
       } catch (error) {
         console.error("Error processing square icon:", error);
@@ -131,6 +180,24 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
+    // Fallback: if no squareIcon from favicon but we have a logo URL,
+    // try processing the logo as a squareIcon.  Sites like Wix serve a
+    // generic hosting favicon so the favicon pipeline yields nothing,
+    // but the logo extractor finds the actual brand mark.
+    if (!squareIcon && scrapedData.logo) {
+      try {
+        squareIcon = await processSquareIcon(scrapedData.logo);
+        if (squareIcon) {
+          [squareIconBg, logoDominantColor] = await Promise.all([
+            extractSquareIconBg(squareIcon),
+            extractLogoDominantColor(squareIcon),
+          ]);
+        }
+      } catch (error) {
+        console.error("Error processing logo as square icon fallback:", error);
+      }
+    }
+
     // Generate gradient image for login (approach 3)
     const scrapedImagesInfo = scrapedData.images.map(img => ({
       url: img.url,
@@ -141,9 +208,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
 
     let gradientDebugInfo: GradientDebug | undefined;
 
-    // Extract domain for deterministic gradient hashing
-    let domain = "unknown";
-    try { domain = new URL(targetUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+    // domain already extracted above for OG hero debug
 
     if (isOpenAIConfigured()) {
       try {
@@ -189,12 +254,27 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       }
     }
 
-    // 9. Clean company name
-    const companyName = cleanCompanyName(
-      scrapedData.meta["og:site_name"] ||
-      scrapedData.meta["og:title"] ||
-      scrapedData.title
+    // 9. Select company name from candidates
+    const companyNameResult = selectCompanyName(scrapedData.companyNameCandidates);
+    const companyName = companyNameResult.name;
+
+    // Debug: log all candidates and scores
+    console.log(
+      `[company-name] ${targetUrl} → "${companyName}" from ${scrapedData.companyNameCandidates.length} candidates`
     );
+    for (const c of companyNameResult.candidates.slice(0, 8)) {
+      console.log(
+        `  [${c.source}${c.parentSource ? ` (${c.parentSource})` : ""}] "${c.value}" → score: ${c.score} (${c.reasons.join(", ")})`
+      );
+    }
+
+    // ── Welcome message (discipline-tailored when confident) ──
+    const welcomeMsg = generateWelcomeMessage({
+      companyName,
+      discipline: disciplineResult.discipline,
+      confidence: disciplineResult.confidence,
+      domain,
+    });
 
     // 10. Build response
     const portalData: PortalData = {
@@ -203,6 +283,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       images: {
         squareIcon,
         squareIconBg,
+        logoDominantColor,
         fullLogo,
         loginImage,
         dashboardImage: dalleImageUrl,
@@ -210,6 +291,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         rawFaviconUrl: scrapedData.favicon,
         rawLogoUrl: scrapedData.logo,
       },
+      welcomeMessage: welcomeMsg.text,
     };
 
     const rawOutputs: RawOutputs = {
@@ -238,6 +320,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         originalColors: validatedColors.qualityGate.originalColors,
       },
       accentPromotion: validatedColors.accentPromotion,
+      welcomeMessageSource: welcomeMsg.source,
       disciplineDetection: {
         discipline: disciplineResult.discipline,
         confidence: disciplineResult.confidence,
@@ -252,6 +335,30 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         loginImageSource,
       },
       gradientDebug: gradientDebugInfo,
+      companyNameDebug: {
+        selectedName: companyNameResult.name,
+        candidates: companyNameResult.candidates.map((c) => ({
+          value: c.value,
+          source: c.source,
+          parentSource: c.parentSource,
+          score: c.score,
+          reasons: c.reasons,
+        })),
+      },
+      ogHeroEvaluation: {
+        ogImageUrl: ogHeroResult.ogImageUrl,
+        passed: ogHeroResult.passed,
+        score: ogHeroResult.score,
+      },
+      scrapedHeroEvaluation: scrapedHeroResult
+        ? {
+            passed: scrapedHeroResult.passed,
+            imageUrl: scrapedHeroResult.ogImageUrl,
+            candidatesConsidered: scrapedHeroResult.candidatesConsidered,
+            candidatesTried: scrapedHeroResult.candidatesTried,
+            score: scrapedHeroResult.score,
+          }
+        : undefined,
     };
 
     return NextResponse.json({

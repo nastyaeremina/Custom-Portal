@@ -40,6 +40,14 @@ export interface PreviewBranding {
   squareIconBg: string | null;
 
   /**
+   * Dominant foreground colour of the square icon (hex, e.g. "#2055a4").
+   * Used to contrast-check proposed avatar backgrounds — rejects
+   * accent colours that are too similar to the logo (blue-on-blue etc.).
+   * null when extraction fails or logo has no clear dominant colour.
+   */
+  logoDominantColor: string | null;
+
+  /**
    * Full horizontal logo URL (min 180 px height).
    * Currently unused in the 3 preview screens but kept for future
    * screens (e.g. email header, social card).
@@ -128,10 +136,6 @@ export interface GeneratedPreviewPayload {
  */
 import type { PortalData, RawOutputs } from "./api";
 
-/** Static fallback for `copy.welcomeMessageText` until the pipeline generates it. */
-const DEFAULT_WELCOME_MESSAGE =
-  "Welcome! We're excited to work together. This is your portal — feel free to look around and let us know if you need anything.";
-
 export function toPreviewPayload(
   data: PortalData,
   _rawOutputs: RawOutputs | null
@@ -148,6 +152,7 @@ export function toPreviewPayload(
       companyName: data.companyName,
       logoUrl,
       squareIconBg: data.images.squareIconBg ?? null,
+      logoDominantColor: data.images.logoDominantColor ?? null,
       fullLogoUrl: data.images.fullLogo || data.images.rawLogoUrl || null,
     },
     theme: {
@@ -161,13 +166,7 @@ export function toPreviewPayload(
       socialImageUrl: data.images.socialImage,
     },
     copy: {
-      /**
-       * TODO: Replace with pipeline-generated text once the
-       * generation logic is implemented.  For now, fall back to
-       * a generic welcome string so the Messages screen is never
-       * empty.
-       */
-      welcomeMessageText: DEFAULT_WELCOME_MESSAGE,
+      welcomeMessageText: data.welcomeMessage,
     },
   };
 }

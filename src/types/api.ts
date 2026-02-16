@@ -17,6 +17,9 @@ export interface PortalImages {
   /** Dominant background color of the squareIcon (hex, e.g. "#2c2c3e").
    *  Used to fill the message-avatar container so the logo blends seamlessly. */
   squareIconBg: string | null;
+  /** Dominant foreground (logo) colour of the squareIcon (hex, e.g. "#2055a4").
+   *  Used to contrast-check proposed avatar backgrounds and avoid blue-on-blue etc. */
+  logoDominantColor: string | null;
   fullLogo: string | null;
   loginImage: string | null;
   /** Dashboard hero banner image (gradient generated from brand colors). */
@@ -32,6 +35,8 @@ export interface PortalData {
   companyName: string;
   colors: PortalColors;
   images: PortalImages;
+  /** Welcome message for the Messages view (discipline-tailored or default). */
+  welcomeMessage: string;
 }
 
 export interface ColorWithUsage {
@@ -107,6 +112,84 @@ export interface RawOutputs {
     score: number;
     useGradient: boolean;
     reason: string;
+  };
+  /** Company name selection debug info */
+  companyNameDebug?: {
+    selectedName: string;
+    candidates: Array<{
+      value: string;
+      source: string;
+      parentSource?: string;
+      score: number;
+      reasons: string[];
+    }>;
+  };
+  /** Brand mark selection debug info */
+  brandMarkSelection?: {
+    candidates: Array<{
+      url: string;
+      source: string;
+      totalScore: number;
+      scores: {
+        aspect: number;
+        resolution: number;
+        complexity: number;
+        source: number;
+        monogram: number;
+      };
+      disqualified: boolean;
+      disqualifyReason?: string;
+    }>;
+    selectedSource: string | null;
+    fallbackToInitials: boolean;
+    log: string[];
+  };
+  /** OG image evaluation for login hero */
+  ogHeroEvaluation?: {
+    ogImageUrl: string | null;
+    passed: boolean;
+    score: {
+      scores: {
+        resolution: number;
+        aspectRatio: number;
+        complexity: number;
+        area: number;
+        edgeDensity: number;
+        spatialSpread: number;
+      };
+      total: number;
+      passed: boolean;
+      reasons: string[];
+    } | null;
+  };
+  /** Scraped hero image evaluation (fallback when OG image fails) */
+  scrapedHeroEvaluation?: {
+    passed: boolean;
+    imageUrl: string | null;
+    candidatesConsidered: number;
+    candidatesTried: number;
+    score: {
+      scores: {
+        resolution: number;
+        aspectRatio: number;
+        complexity: number;
+        area: number;
+        edgeDensity: number;
+        spatialSpread: number;
+      };
+      total: number;
+      passed: boolean;
+      reasons: string[];
+    } | null;
+  };
+  /** Welcome message source: "discipline" if tailored, "default" if generic */
+  welcomeMessageSource?: "discipline" | "default";
+  /** Parked / placeholder domain detection debug info */
+  parkedDomainDetection?: {
+    isParked: boolean;
+    score: number;
+    threshold: number;
+    signals: string[];
   };
 }
 
