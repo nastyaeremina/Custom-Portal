@@ -85,6 +85,11 @@ export interface PreviewImages {
    * Fallback: `/assets/Images/Rectangle 34624749.png` (spiral staircase).
    */
   loginHeroImageUrl: string | null;
+  loginImageOrientation: "landscape" | "portrait" | "square" | null;
+  loginImageType: "text_heavy" | "photo" | null;
+  /** Dominant edge color (hex) of the login hero image. Used as letterbox
+   *  background behind contain-fitted text-heavy images. */
+  loginImageEdgeColor: string | null;
 
   /**
    * Dashboard screen hero / banner image.
@@ -162,6 +167,9 @@ export function toPreviewPayload(
     },
     images: {
       loginHeroImageUrl: data.images.loginImage,
+      loginImageOrientation: data.images.loginImageOrientation ?? null,
+      loginImageType: data.images.loginImageType ?? null,
+      loginImageEdgeColor: data.images.loginImageEdgeColor ?? null,
       dashboardHeroImageUrl: data.images.dashboardImage,
       socialImageUrl: data.images.socialImage,
     },

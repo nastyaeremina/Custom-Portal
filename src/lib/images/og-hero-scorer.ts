@@ -65,8 +65,8 @@ export interface OgHeroEvaluation {
   ogImageUrl: string | null;
   /** Whether the OG image passed all quality gates. */
   passed: boolean;
-  /** Processed 1160×1160 data URL (base64 PNG) — null if not passed. */
-  processedImageDataUrl: string | null;
+  /** Processed hero image result — null if not passed. */
+  processedImage: HeroImageResult | null;
   /** Score breakdown for debug output. */
   score: OgHeroScore | null;
 }
@@ -215,7 +215,7 @@ export async function evaluateOgHero(
   ogImageUrl: string | null
 ): Promise<OgHeroEvaluation> {
   if (!ogImageUrl) {
-    return { ogImageUrl: null, passed: false, processedImageDataUrl: null, score: null };
+    return { ogImageUrl: null, passed: false, processedImage: null, score: null };
   }
 
   const reasons: string[] = [];
@@ -250,10 +250,11 @@ export async function evaluateOgHero(
     }
 
     // ── Score: aspect ratio (soft penalty) ─────────────────────────
-    // We crop to 1160×1160 (square) with fit: "cover", so images closer
-    // to 1:1 crop with minimal loss.  Wide images lose width — scored as
-    // a soft penalty since the pixel-analysis gates (edge density, spatial
-    // spread) already evaluate the *cropped* content quality.
+    // We preserve the original aspect ratio (no square crop), so landscape
+    // images are no longer destructively cropped.  The browser's CSS
+    // object-cover handles the final fit.  Mild landscape is ideal for the
+    // tall login container; very wide images get a blurred background
+    // extension.  Portrait images are still hard-rejected.
     let aspectScore: number;
     const isPortrait = height > width * MAX_PORTRAIT_RATIO;
     const landscapeRatio = width > 0 && height > 0 ? width / height : 1;
@@ -261,15 +262,15 @@ export async function evaluateOgHero(
     if (isPortrait) {
       aspectScore = 0;
       reasons.push(`portrait ${width}×${height} (h > w × ${MAX_PORTRAIT_RATIO})`);
-    } else if (landscapeRatio <= 1.2) {
-      aspectScore = 100; // nearly square — ideal
     } else if (landscapeRatio <= 1.5) {
-      // Mild landscape — moderate crop (~17-33% loss)
-      aspectScore = 70 + ((1.5 - landscapeRatio) / 0.3) * 30; // 70–100
+      aspectScore = 100; // square to mild landscape — ideal
     } else if (landscapeRatio <= 2.0) {
-      // Standard OG ratio — significant crop (~33-50% loss)
-      aspectScore = 30 + ((2.0 - landscapeRatio) / 0.5) * 40; // 30–70
-      reasons.push(`wide ${landscapeRatio.toFixed(1)}:1 (${Math.round((1 - 1 / landscapeRatio) * 100)}% crop loss)`);
+      // Standard OG ratio — CSS will crop sides mildly
+      aspectScore = 60 + ((2.0 - landscapeRatio) / 0.5) * 40; // 60–100
+    } else if (landscapeRatio <= 2.5) {
+      // Wide — blurred bg extension kicks in, still usable
+      aspectScore = 30 + ((2.5 - landscapeRatio) / 0.5) * 30; // 30–60
+      reasons.push(`wide ${landscapeRatio.toFixed(1)}:1`);
     } else {
       aspectScore = 0;
       reasons.push(`ultra-wide ${landscapeRatio.toFixed(1)}:1`);
@@ -412,20 +413,19 @@ export async function evaluateOgHero(
       reasons,
     };
 
-    // ── Process to 1160×1160 if passed ──────────────────────────────
-    let processedImageDataUrl: string | null = null;
+    // ── Prepare hero image if passed ─────────────────────────
+    let processedImage: HeroImageResult | null = null;
     if (passed) {
-      const resized = await resizeImage(buffer, 1160, 1160, "cover");
-      processedImageDataUrl = `data:image/png;base64,${resized.toString("base64")}`;
+      processedImage = await prepareHeroImage(buffer);
     }
 
-    return { ogImageUrl, passed, processedImageDataUrl, score };
+    return { ogImageUrl, passed, processedImage, score };
   } catch (error) {
     // Fetch or Sharp failure — fail gracefully
     return {
       ogImageUrl,
       passed: false,
-      processedImageDataUrl: null,
+      processedImage: null,
       score: {
         scores: {
           resolution: 0,
@@ -445,6 +445,365 @@ export async function evaluateOgHero(
   }
 }
 
+// ─── Hero image classifier ──────────────────────────────────────────────────
+
+/** Thumbnail size for classification pixel analysis. */
+const CLASSIFY_SIZE = 100;
+
+/** Quantization step for color counting in classifier. */
+const CLASSIFY_Q_STEP = 24;
+
+/** Points needed to classify as text-heavy. Errs toward photo when uncertain. */
+const TEXT_HEAVY_THRESHOLD = 45;
+
+export interface HeroClassification {
+  type: "text_heavy" | "photo";
+  confidence: number; // 0.0–1.0
+  /** Raw text-likelihood score (0–100). Higher = more text-heavy. */
+  textLikelihood: number;
+  signals: Record<string, number>;
+}
+
+export interface HeroImageResult {
+  dataUrl: string;
+  orientation: "landscape" | "portrait" | "square";
+  imageType: "text_heavy" | "photo";
+  confidence: number;
+  /** Raw text-likelihood score from the classifier (0–100). Higher = more text-heavy. */
+  textLikelihood: number;
+  /** Dominant edge color (hex) sampled from image borders. Used as background
+   *  behind contain-fitted text-heavy images so letterboxing blends in. */
+  edgeColor: string;
+}
+
+/**
+ * Classify a hero image as text-heavy (OG banners, UI screenshots, logos)
+ * or photo/abstract (safe to crop).
+ *
+ * Uses 7 lightweight pixel signals on a 100×100 thumbnail. No OCR, no OpenAI.
+ */
+async function classifyHeroImage(buffer: Buffer): Promise<HeroClassification> {
+  const meta = await sharp(buffer).metadata();
+  const origW = meta.width ?? 1;
+  const origH = meta.height ?? 1;
+  const aspectRatio = origW / origH;
+
+  // ── Early exits ──
+  if (aspectRatio > 1.85) {
+    return {
+      type: "text_heavy",
+      confidence: 0.85,
+      textLikelihood: 80,
+      signals: { earlyExit: 1, aspect: aspectRatio },
+    };
+  }
+  if (aspectRatio < 0.67) {
+    return {
+      type: "photo",
+      confidence: 0.80,
+      textLikelihood: 10,
+      signals: { earlyExit: 2, aspect: aspectRatio },
+    };
+  }
+
+  try {
+    // ── Build 100×100 thumbnail for analysis ──
+    const { data, info } = await sharp(buffer)
+      .resize(CLASSIFY_SIZE, CLASSIFY_SIZE, { fit: "fill" })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const w = info.width;
+    const h = info.height;
+    const ch = info.channels;
+    const totalPixels = w * h;
+
+    // ── Signal 1: High-contrast edge ratio ──
+    // Text/UI has many sharp edges (gradient > 40); photos have gradual transitions
+    let highEdgeCount = 0;
+    let totalEdgeCount = 0;
+    for (let y = 0; y < h - 1; y++) {
+      for (let x = 0; x < w - 1; x++) {
+        const idx = (y * w + x) * ch;
+        const rIdx = idx + ch;
+        const bIdx = ((y + 1) * w + x) * ch;
+        const hGrad = (Math.abs(data[idx] - data[rIdx]) +
+          Math.abs(data[idx + 1] - data[rIdx + 1]) +
+          Math.abs(data[idx + 2] - data[rIdx + 2])) / 3;
+        const vGrad = (Math.abs(data[idx] - data[bIdx]) +
+          Math.abs(data[idx + 1] - data[bIdx + 1]) +
+          Math.abs(data[idx + 2] - data[bIdx + 2])) / 3;
+        const grad = Math.max(hGrad, vGrad);
+        totalEdgeCount++;
+        if (grad > 40) highEdgeCount++;
+      }
+    }
+    const highContrastRatio = totalEdgeCount > 0 ? highEdgeCount / totalEdgeCount : 0;
+
+    // ── Signal 2: Background uniformity (flood-fill from corners) ──
+    // Large solid bg = marketing banner or logo-on-solid
+    const tolerance = 20;
+    const visited = new Uint8Array(totalPixels);
+    let uniformCount = 0;
+
+    const corners = [
+      [0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1],
+    ];
+
+    for (const [cx, cy] of corners) {
+      const stack: [number, number][] = [[cx, cy]];
+      const seedIdx = (cy * w + cx) * ch;
+      const seedR = data[seedIdx], seedG = data[seedIdx + 1], seedB = data[seedIdx + 2];
+
+      while (stack.length > 0) {
+        const [px, py] = stack.pop()!;
+        const pIdx = py * w + px;
+        if (px < 0 || px >= w || py < 0 || py >= h) continue;
+        if (visited[pIdx]) continue;
+
+        const dIdx = pIdx * ch;
+        if (Math.abs(data[dIdx] - seedR) + Math.abs(data[dIdx + 1] - seedG) +
+            Math.abs(data[dIdx + 2] - seedB) > tolerance * 3) continue;
+
+        visited[pIdx] = 1;
+        uniformCount++;
+        stack.push([px + 1, py], [px - 1, py], [px, py + 1], [px, py - 1]);
+      }
+    }
+    const bgUniformity = uniformCount / totalPixels;
+
+    // ── Signal 3: Edge orientation bias (H vs V) ──
+    // Text/UI is strongly H/V aligned; photos are organic
+    let hEdgeSum = 0, vEdgeSum = 0;
+    for (let y = 0; y < h - 1; y++) {
+      for (let x = 0; x < w - 1; x++) {
+        const idx = (y * w + x) * ch;
+        const rIdx = idx + ch;
+        const bIdx = ((y + 1) * w + x) * ch;
+        hEdgeSum += (Math.abs(data[idx] - data[rIdx]) +
+          Math.abs(data[idx + 1] - data[rIdx + 1]) +
+          Math.abs(data[idx + 2] - data[rIdx + 2])) / 3;
+        vEdgeSum += (Math.abs(data[idx] - data[bIdx]) +
+          Math.abs(data[idx + 1] - data[bIdx + 1]) +
+          Math.abs(data[idx + 2] - data[bIdx + 2])) / 3;
+      }
+    }
+    const edgeTotal = hEdgeSum + vEdgeSum;
+    const hvBias = edgeTotal > 0 ? Math.abs(hEdgeSum - vEdgeSum) / edgeTotal : 0;
+
+    // ── Signal 4: Color count (unique quantized colors on 50×50) ──
+    const { data: thumbData, info: thumbInfo } = await sharp(buffer)
+      .resize(50, 50, { fit: "cover" })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const colorSet = new Set<string>();
+    for (let i = 0; i < thumbData.length; i += thumbInfo.channels) {
+      const r = Math.round(thumbData[i] / CLASSIFY_Q_STEP) * CLASSIFY_Q_STEP;
+      const g = Math.round(thumbData[i + 1] / CLASSIFY_Q_STEP) * CLASSIFY_Q_STEP;
+      const b = Math.round(thumbData[i + 2] / CLASSIFY_Q_STEP) * CLASSIFY_Q_STEP;
+      colorSet.add(`${r},${g},${b}`);
+    }
+    const uniqueColors = colorSet.size;
+
+    // ── Signal 5: Saturation spread ──
+    // Low stddev = designed/flat, high = photo
+    let satSum = 0, satSqSum = 0;
+    const satCount = thumbData.length / thumbInfo.channels;
+    for (let i = 0; i < thumbData.length; i += thumbInfo.channels) {
+      const r = thumbData[i] / 255, g = thumbData[i + 1] / 255, b = thumbData[i + 2] / 255;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      const l = (max + min) / 2;
+      const s = max === min ? 0 : (l > 0.5 ? (max - min) / (2 - max - min) : (max - min) / (max + min));
+      satSum += s;
+      satSqSum += s * s;
+    }
+    const satMean = satSum / satCount;
+    const satStd = Math.sqrt(Math.max(0, satSqSum / satCount - satMean * satMean));
+
+    // ── Signal 6: Spatial spread (reuse existing function) ──
+    const spread = computeSpatialSpread(data, w, h, ch);
+
+    // ── Signal 7: Border emptiness ──
+    // Mean activity in 10% border strips vs center 80%
+    const borderPx = Math.round(w * 0.10);
+    let borderAct = 0, borderN = 0;
+    let centerAct = 0, centerN = 0;
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = (y * w + x) * ch;
+        // Simple activity: deviation from gray
+        const px = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        const dev = (Math.abs(data[idx] - px) + Math.abs(data[idx + 1] - px) + Math.abs(data[idx + 2] - px)) / 3;
+
+        const isBorder = x < borderPx || x >= w - borderPx || y < borderPx || y >= h - borderPx;
+        if (isBorder) { borderAct += dev; borderN++; }
+        else { centerAct += dev; centerN++; }
+      }
+    }
+    const borderRatio = (centerN > 0 && borderN > 0)
+      ? (borderAct / borderN) / (centerAct / centerN)
+      : 1;
+
+    // ── Score accumulation (positive = lean text_heavy) ──
+    let textScore = 0;
+
+    // Signal 1: High-contrast edges
+    if (highContrastRatio > 0.40) textScore += 20;
+    else if (highContrastRatio > 0.25) textScore += 10;
+
+    // Signal 2: Background uniformity
+    if (bgUniformity > 0.35) textScore += 20;
+    else if (bgUniformity > 0.20) textScore += 10;
+
+    // Signal 3: H/V orientation bias
+    if (hvBias > 0.40) textScore += 15;
+    else if (hvBias > 0.25) textScore += 8;
+
+    // Signal 4: Low color count
+    if (uniqueColors < 30) textScore += 15;
+    else if (uniqueColors < 50) textScore += 8;
+
+    // Signal 5: Low saturation spread
+    if (satStd < 0.10) textScore += 10;
+    else if (satStd < 0.18) textScore += 5;
+
+    // Signal 6: Low spatial spread (concentrated content)
+    if (spread < 0.50) textScore += 10;
+    else if (spread < 0.65) textScore += 5;
+
+    // Signal 7: Empty borders
+    if (borderRatio < 0.25) textScore += 10;
+    else if (borderRatio < 0.40) textScore += 5;
+
+    const isTextHeavy = textScore >= TEXT_HEAVY_THRESHOLD;
+    const confidence = Math.min(Math.abs(textScore - TEXT_HEAVY_THRESHOLD) / 30, 1.0);
+
+    const signals: Record<string, number> = {
+      highContrastRatio: +highContrastRatio.toFixed(3),
+      bgUniformity: +bgUniformity.toFixed(3),
+      hvBias: +hvBias.toFixed(3),
+      uniqueColors,
+      satStd: +satStd.toFixed(3),
+      spread: +spread.toFixed(3),
+      borderRatio: +borderRatio.toFixed(3),
+      textScore,
+    };
+
+    console.log(
+      `[hero-type] ${origW}×${origH} → ${isTextHeavy ? "TEXT_HEAVY" : "PHOTO"} ` +
+        `(conf=${confidence.toFixed(2)}) ` +
+        `highContrast=${highContrastRatio.toFixed(2)} bgUniform=${bgUniformity.toFixed(2)} ` +
+        `hvBias=${hvBias.toFixed(2)} colors=${uniqueColors} satStd=${satStd.toFixed(2)} ` +
+        `spread=${(spread * 100).toFixed(0)}% borderRatio=${borderRatio.toFixed(2)} ` +
+        `score=${textScore}`
+    );
+
+    return { type: isTextHeavy ? "text_heavy" : "photo", confidence, textLikelihood: textScore, signals };
+  } catch {
+    return { type: "photo", confidence: 0.5, textLikelihood: 0, signals: { error: 1 } };
+  }
+}
+
+// ── Hero image preparation ──────────────────────────────────────────────────
+
+/** Max long side for bandwidth — CSS handles the final display. */
+const HERO_MAX_SIDE = 1200;
+
+/** JPEG quality for hero images. */
+const HERO_JPEG_QUALITY = 82;
+
+/** Border strip thickness (fraction of image dimension) for edge color sampling. */
+const EDGE_SAMPLE_STRIP = 0.05;
+
+/**
+ * Sample the dominant edge color from the border pixels of an image.
+ *
+ * Collects pixels from a thin strip around all four edges, averages them,
+ * and returns a hex color. Used as the letterbox background behind
+ * contain-fitted text-heavy images.
+ */
+async function sampleEdgeColor(buffer: Buffer): Promise<string> {
+  try {
+    const { data, info } = await sharp(buffer)
+      .resize(100, 100, { fit: "fill" })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const w = info.width;
+    const h = info.height;
+    const ch = info.channels;
+    const strip = Math.max(1, Math.round(w * EDGE_SAMPLE_STRIP));
+
+    let sumR = 0, sumG = 0, sumB = 0, count = 0;
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const isBorder =
+          x < strip || x >= w - strip || y < strip || y >= h - strip;
+        if (!isBorder) continue;
+
+        const idx = (y * w + x) * ch;
+        sumR += data[idx];
+        sumG += data[idx + 1];
+        sumB += data[idx + 2];
+        count++;
+      }
+    }
+
+    if (count === 0) return "#f5f5f5";
+
+    const r = Math.round(sumR / count);
+    const g = Math.round(sumG / count);
+    const b = Math.round(sumB / count);
+
+    return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+  } catch {
+    return "#f5f5f5";
+  }
+}
+
+/**
+ * Prepare a hero image for the login screen.
+ *
+ * 1. Classifies image type (text_heavy vs photo)
+ * 2. Samples edge color (used as letterbox bg for text-heavy images)
+ * 3. Resizes for bandwidth (cap long side at 1200px, preserve aspect ratio)
+ * 4. Converts to JPEG for smaller base64 payloads
+ *
+ * No cropping. No contain/cover rendering. CSS handles the display.
+ */
+export async function prepareHeroImage(buffer: Buffer): Promise<HeroImageResult> {
+  const classification = await classifyHeroImage(buffer);
+  const edgeColor = await sampleEdgeColor(buffer);
+
+  const meta = await sharp(buffer).metadata();
+  const w = meta.width ?? 1;
+  const h = meta.height ?? 1;
+  const ratio = w / h;
+
+  const orientation: "landscape" | "portrait" | "square" =
+    ratio > 1.15 ? "landscape" : ratio < 0.87 ? "portrait" : "square";
+
+  const processed = await sharp(buffer)
+    .resize({ width: HERO_MAX_SIDE, height: HERO_MAX_SIDE, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: HERO_JPEG_QUALITY })
+    .toBuffer();
+
+  return {
+    dataUrl: `data:image/jpeg;base64,${processed.toString("base64")}`,
+    orientation,
+    imageType: classification.type,
+    confidence: classification.confidence,
+    textLikelihood: classification.textLikelihood,
+    edgeColor,
+  };
+}
+
 // ─── Scraped hero fallback ──────────────────────────────────────────────────
 
 export interface ScrapedHeroEvaluation extends OgHeroEvaluation {
@@ -454,12 +813,18 @@ export interface ScrapedHeroEvaluation extends OgHeroEvaluation {
   candidatesTried: number;
 }
 
+/** Below this textLikelihood score, an image is confidently photo-like. */
+const PHOTO_PREFERRED_THRESHOLD = 30;
+
 /**
  * Evaluate scraped hero images as login hero candidates.
  *
  * Filters, deduplicates, and ranks hero images by size, then tries the top
- * candidates through the same quality gate as OG images.  Returns the first
- * passing result, or a fail result if none pass.
+ * candidates through the same quality gate as OG images.
+ *
+ * **Photo preference:** Collects all passing candidates (up to maxTries) and
+ * prefers photo-like images (textLikelihood < 30). Only falls back to a
+ * text-heavy image if no photo-like option passes the quality gate.
  *
  * Only runs when the OG image has already failed — so this adds zero cost to
  * the happy path.
@@ -510,11 +875,16 @@ export async function evaluateScrapedHeroes(
     return areaB - areaA;
   });
 
-  // 5. Try top N candidates through the same quality gate
+  // 5. Try top N candidates through the same quality gate.
+  //    Collect all passing results so we can prefer photo-like over text-heavy.
   const candidates = sorted.slice(0, maxTries);
 
   let bestFailedScore: OgHeroScore | null = null;
   let bestFailedUrl: string | null = null;
+
+  // Passing candidates: { result, index }
+  let bestPhoto: { result: OgHeroEvaluation; triedIndex: number } | null = null;
+  let bestTextHeavy: { result: OgHeroEvaluation; triedIndex: number } | null = null;
 
   for (let i = 0; i < candidates.length; i++) {
     const candidate = candidates[i];
@@ -529,25 +899,44 @@ export async function evaluateScrapedHeroes(
           `total=${result.score.total} (${result.score.reasons.join("; ")})`
       );
     }
-    if (result.passed && result.processedImageDataUrl) {
-      return {
-        ...result,
-        candidatesConsidered: prefiltered.length,
-        candidatesTried: i + 1,
-      };
+    if (result.passed && result.processedImage) {
+      const tl = result.processedImage.textLikelihood;
+      console.log(
+        `[scraped-hero] candidate ${i + 1} textLikelihood=${tl} → ${tl < PHOTO_PREFERRED_THRESHOLD ? "PHOTO" : "TEXT_HEAVY"}`
+      );
+
+      if (tl < PHOTO_PREFERRED_THRESHOLD) {
+        // Found a photo-like winner — use immediately
+        bestPhoto = { result, triedIndex: i };
+        break;
+      } else if (!bestTextHeavy) {
+        // First passing text-heavy — keep as fallback, continue looking for photos
+        bestTextHeavy = { result, triedIndex: i };
+      }
+    } else {
+      // Track the best-scoring failure for debug output
+      if (result.score && (!bestFailedScore || result.score.total > bestFailedScore.total)) {
+        bestFailedScore = result.score;
+        bestFailedUrl = candidate.url;
+      }
     }
-    // Track the best-scoring failure for debug output
-    if (result.score && (!bestFailedScore || result.score.total > bestFailedScore.total)) {
-      bestFailedScore = result.score;
-      bestFailedUrl = candidate.url;
-    }
+  }
+
+  // Prefer photo-like, fall back to text-heavy
+  const winner = bestPhoto ?? bestTextHeavy;
+  if (winner) {
+    return {
+      ...winner.result,
+      candidatesConsidered: prefiltered.length,
+      candidatesTried: winner.triedIndex + 1,
+    };
   }
 
   // None passed — return the best failed score for debug visibility
   return {
     ogImageUrl: bestFailedUrl,
     passed: false,
-    processedImageDataUrl: null,
+    processedImage: null,
     score: bestFailedScore,
     candidatesConsidered: prefiltered.length,
     candidatesTried: candidates.length,

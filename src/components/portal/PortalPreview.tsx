@@ -460,6 +460,9 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
                         branding={payload.branding}
                         theme={payload.theme}
                         loginHeroImageUrl={payload.images.loginHeroImageUrl}
+                        loginImageOrientation={payload.images.loginImageOrientation}
+                        loginImageType={payload.images.loginImageType}
+                        loginImageEdgeColor={payload.images.loginImageEdgeColor}
                       />
                     )}
                     {screen.id === "home" && (

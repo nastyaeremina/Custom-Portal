@@ -7,12 +7,18 @@ interface LoginViewProps {
   branding: PreviewBranding;
   theme: PreviewTheme;
   loginHeroImageUrl: string | null;
+  loginImageOrientation?: "landscape" | "portrait" | "square" | null;
+  loginImageType?: "text_heavy" | "photo" | null;
+  loginImageEdgeColor?: string | null;
 }
 
 export function LoginView({
   branding,
   theme,
   loginHeroImageUrl,
+  loginImageOrientation,
+  loginImageType,
+  loginImageEdgeColor,
 }: LoginViewProps) {
   const { companyName, logoUrl, squareIconBg, logoDominantColor } = branding;
   const { sidebarBackground, sidebarText } = theme;
@@ -106,12 +112,41 @@ export function LoginView({
 
       {/* ─── Right: Hero image (hidden when no image provided) ─── */}
       {loginHeroImageUrl && (
-        <div className="w-[55%] relative bg-neutral-100 border-l border-neutral-200">
+        <div
+          className="w-[55%] relative border-l border-neutral-200 overflow-hidden"
+          style={{
+            backgroundColor:
+              loginImageType === "text_heavy" && loginImageEdgeColor
+                ? loginImageEdgeColor
+                : "#f5f5f5",
+          }}
+        >
           <img
             src={loginHeroImageUrl}
             alt="Login background"
-            className="w-full h-full object-cover"
+            className="w-full h-full"
+            style={
+              loginImageType === "text_heavy"
+                ? {
+                    /* Preserve full width — no horizontal cropping so text is never cut.
+                       Vertical letterboxing is filled by the edge-color background. */
+                    objectFit: "contain",
+                    objectPosition: "center center",
+                  }
+                : {
+                    /* Photo-like: full-bleed cover crop is safe. */
+                    objectFit: "cover",
+                    objectPosition: "center center",
+                  }
+            }
           />
+          {/* Subtle bottom fade for text-heavy landscape images to soften letterbox edge */}
+          {loginImageType === "text_heavy" && loginImageOrientation === "landscape" && (
+            <div
+              className="absolute inset-x-0 bottom-0 h-[25%] pointer-events-none"
+              style={{ background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)" }}
+            />
+          )}
         </div>
       )}
     </div>

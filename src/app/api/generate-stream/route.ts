@@ -16,7 +16,9 @@ import {
   selectBestBrandMark,
   processBrandMark,
 } from "@/lib/images/brand-mark-selector";
-import { evaluateOgHero, evaluateScrapedHeroes, type ScrapedHeroEvaluation } from "@/lib/images/og-hero-scorer";
+import { evaluateOgHero, evaluateScrapedHeroes, prepareHeroImage, type ScrapedHeroEvaluation, type HeroImageResult } from "@/lib/images/og-hero-scorer";
+import fs from "fs";
+import path from "path";
 import {
   isOpenAIConfigured,
   generateAllDalleImages,
@@ -246,10 +248,16 @@ export async function POST(request: NextRequest) {
             `(${ogHeroResult.score ? `total=${ogHeroResult.score.total}, ${ogHeroResult.score.reasons.join("; ")}` : "no OG image"})`
         );
 
-        // ── Scraped hero fallback (only when OG image failed) ─────────
+        // ── Scraped hero fallback ───────────────────────────────────────
+        // Run when OG image failed OR when OG image passed but is text-heavy
+        // (we still want to look for a photo-like alternative).
         let scrapedHeroResult: ScrapedHeroEvaluation | null = null;
+        const ogPassedTextHeavy =
+          ogHeroResult.passed &&
+          ogHeroResult.processedImage &&
+          ogHeroResult.processedImage.textLikelihood >= 30;
 
-        if (!ogHeroResult.passed) {
+        if (!ogHeroResult.passed || ogPassedTextHeavy) {
           scrapedHeroResult = await evaluateScrapedHeroes(
             scrapedData.images,
             scrapedData.ogImage
@@ -258,7 +266,8 @@ export async function POST(request: NextRequest) {
           console.log(
             `[scraped-hero] ${domain} → ${scrapedHeroResult.passed ? "PASS" : "FAIL"} ` +
               `(considered: ${scrapedHeroResult.candidatesConsidered}, tried: ${scrapedHeroResult.candidatesTried}` +
-              `${scrapedHeroResult.score ? `, total=${scrapedHeroResult.score.total}` : ""})`
+              `${scrapedHeroResult.score ? `, total=${scrapedHeroResult.score.total}` : ""}` +
+              `${ogPassedTextHeavy ? ", reason=OG was text-heavy, looking for photo" : ""})`
           );
         }
 
@@ -307,12 +316,45 @@ export async function POST(request: NextRequest) {
         // When source is "gradient", the value stays null until gradient generation.
         let loginImage: string | null = null;
         let loginImageSource: string;
+        let loginImageOrientation: "landscape" | "portrait" | "square" | null = null;
+        let loginImageType: "text_heavy" | "photo" | null = null;
+        let loginImageEdgeColor: string | null = null;
         let dashboardImage: string | null = null;
         let dashboardImageSource: string;
 
-        if (ogHeroResult.passed && ogHeroResult.processedImageDataUrl) {
+        // Photo-preference: if OG image passed but is text-heavy and we found
+        // a photo-like scraped hero, prefer the scraped photo.
+        const ogIsTextHeavy =
+          ogHeroResult.passed &&
+          ogHeroResult.processedImage &&
+          ogHeroResult.processedImage.textLikelihood >= 30;
+        const scrapedIsPhoto =
+          scrapedHeroResult?.passed &&
+          scrapedHeroResult.processedImage &&
+          scrapedHeroResult.processedImage.textLikelihood < 30;
+
+        if (ogIsTextHeavy && scrapedIsPhoto && scrapedHeroResult!.processedImage) {
+          // ── SCRAPED PHOTO beats text-heavy OG ──
+          loginImage = scrapedHeroResult!.processedImage!.dataUrl;
+          loginImageOrientation = scrapedHeroResult!.processedImage!.orientation;
+          loginImageType = scrapedHeroResult!.processedImage!.imageType;
+          loginImageEdgeColor = scrapedHeroResult!.processedImage!.edgeColor;
+          loginImageSource = "website";
+          console.log(`[hero-select] preferred scraped photo over text-heavy OG`);
+          if (diverse) {
+            dashboardImage = null;
+            dashboardImageSource = "gradient";
+          } else {
+            const generic = pickGenericImage(targetUrl);
+            dashboardImage = generic.selected ? generic.imageUrl : null;
+            dashboardImageSource = generic.selected ? "generic" : "gradient";
+          }
+        } else if (ogHeroResult.passed && ogHeroResult.processedImage) {
           // ── WEBSITE OG IMAGE (highest priority) ──
-          loginImage = ogHeroResult.processedImageDataUrl;
+          loginImage = ogHeroResult.processedImage.dataUrl;
+          loginImageOrientation = ogHeroResult.processedImage.orientation;
+          loginImageType = ogHeroResult.processedImage.imageType;
+          loginImageEdgeColor = ogHeroResult.processedImage.edgeColor;
           loginImageSource = "website";
           if (diverse) {
             dashboardImage = null;
@@ -322,9 +364,12 @@ export async function POST(request: NextRequest) {
             dashboardImage = generic.selected ? generic.imageUrl : null;
             dashboardImageSource = generic.selected ? "generic" : "gradient";
           }
-        } else if (scrapedHeroResult?.passed && scrapedHeroResult.processedImageDataUrl) {
+        } else if (scrapedHeroResult?.passed && scrapedHeroResult.processedImage) {
           // ── SCRAPED HERO IMAGE (fallback from page content) ──
-          loginImage = scrapedHeroResult.processedImageDataUrl;
+          loginImage = scrapedHeroResult.processedImage.dataUrl;
+          loginImageOrientation = scrapedHeroResult.processedImage.orientation;
+          loginImageType = scrapedHeroResult.processedImage.imageType;
+          loginImageEdgeColor = scrapedHeroResult.processedImage.edgeColor;
           loginImageSource = "website";
           if (diverse) {
             dashboardImage = null;
@@ -362,8 +407,25 @@ export async function POST(request: NextRequest) {
           dashboardImageSource = loginImage ? "generic_same_as_login" : "gradient";
         }
 
+        // ── Process discipline/generic library images ──
+        // Library images are public URLs — prepare for CSS display.
+        if (loginImage && (loginImageSource === "discipline" || loginImageSource === "generic")) {
+          try {
+            const heroPath = path.join(process.cwd(), "public", loginImage);
+            const heroBuffer = fs.readFileSync(heroPath);
+            const heroResult = await prepareHeroImage(heroBuffer);
+            loginImage = heroResult.dataUrl;
+            loginImageOrientation = heroResult.orientation;
+            loginImageType = heroResult.imageType;
+            loginImageEdgeColor = heroResult.edgeColor;
+          } catch (error) {
+            console.error("Error processing library hero:", error);
+            // Keep the original URL as fallback
+          }
+        }
+
         console.log(
-          `[hero-tree] ${domain} → login: ${loginImageSource}${loginImage ? ` (${loginImage})` : " (pending gradient)"} ` +
+          `[hero-tree] ${domain} → login: ${loginImageSource}${loginImage ? ` (${typeof loginImage === "string" && loginImage.startsWith("data:") ? "data:..." : loginImage})` : " (pending gradient)"} ` +
           `| dashboard: ${dashboardImageSource}${dashboardImage ? ` (${dashboardImage})` : " (pending gradient)"}`
         );
 
@@ -381,6 +443,9 @@ export async function POST(request: NextRequest) {
               logoDominantColor: null,
               fullLogo: null,
               loginImage,
+              loginImageOrientation,
+              loginImageType,
+              loginImageEdgeColor,
               dashboardImage,
               socialImage: null,
               rawFaviconUrl: scrapedData.favicon,
@@ -502,6 +567,9 @@ export async function POST(request: NextRequest) {
               logoDominantColor,
               fullLogo,
               loginImage,
+              loginImageOrientation,
+              loginImageType,
+              loginImageEdgeColor,
               dashboardImage,
               socialImage: null,
               rawFaviconUrl: scrapedData.favicon,
@@ -534,6 +602,9 @@ export async function POST(request: NextRequest) {
                 logoDominantColor,
                 fullLogo,
                 loginImage,
+                loginImageOrientation,
+                loginImageType,
+                loginImageEdgeColor,
                 dashboardImage,
                 socialImage: scrapedSocialImage,
                 rawFaviconUrl: scrapedData.favicon,
@@ -620,6 +691,9 @@ export async function POST(request: NextRequest) {
             logoDominantColor,
             fullLogo,
             loginImage,
+            loginImageOrientation,
+            loginImageType,
+            loginImageEdgeColor,
             dashboardImage,
             socialImage,
             rawFaviconUrl: scrapedData.favicon,
