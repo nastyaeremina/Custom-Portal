@@ -149,18 +149,19 @@ export function CompanyLogo({
   const containerBg = logoUrl
     ? (() => {
         if (isSidebar) {
-          const bg = squareIconBg ?? NEAR_WHITE;
-          // Sidebar: also fall back when squareIconBg is unknown (null),
-          // because the near-white container on a dark sidebar looks wrong
-          // for any logo that was designed for a dark surface.
+          // When squareIconBg is known AND light on a dark sidebar,
+          // use the sidebar colour so the container blends seamlessly.
+          // When squareIconBg is null (unknown/transparent), use a white
+          // container so the logo is always visible regardless of sidebar colour.
           if (
+            squareIconBg &&
             isLightColor(squareIconBg) &&
             sidebarBackground &&
             !isLightColor(sidebarBackground)
           ) {
             return sidebarBackground;
           }
-          return bg;
+          return squareIconBg ?? NEAR_WHITE;
         }
         if (isMessages) {
           if (hasWhiteLogo) return darkContrastFill;
