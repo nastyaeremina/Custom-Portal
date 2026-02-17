@@ -24,9 +24,11 @@ export interface PortalImages {
   loginImage: string | null;
   loginImageOrientation: "landscape" | "portrait" | "square" | null;
   loginImageType: "text_heavy" | "photo" | null;
-  /** Dominant edge color (hex) of the login image. Used as letterbox background
-   *  behind contain-fitted text-heavy images so padding blends seamlessly. */
+  /** Dominant edge color (hex) of the login image. */
   loginImageEdgeColor: string | null;
+  /** Gradient image to use as login hero background when no photo hero is available.
+   *  Shown with centered company logo for a premium fallback look. */
+  loginGradientImage: string | null;
   /** Dashboard hero banner image (gradient generated from brand colors). */
   dashboardImage: string | null;
   socialImage: string | null;

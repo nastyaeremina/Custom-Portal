@@ -17,6 +17,9 @@
  *   "messages" → 32 × 32 px, fully circular, 4px padding, object-fit: contain.
  *               Background: squareIconBg ▸ near-white fallback.
  *               Exception: white logo (light bg + no foreground colour) → sidebar fill.
+ *   "login-hero" → 64 × 64 px, 8 px corner-radius, 4px padding.
+ *               Larger logo variant for gradient+logo fallback on the login hero.
+ *               Background: transparent (the frosted-glass container is in the parent).
  */
 
 interface CompanyLogoProps {
@@ -25,7 +28,7 @@ interface CompanyLogoProps {
   /** Company name — used for alt text and initials derivation */
   companyName: string;
   /** Which surface this logo sits on */
-  variant: "sidebar" | "login" | "messages";
+  variant: "sidebar" | "login" | "messages" | "login-hero";
   /**
    * Dominant background colour extracted from the processed squareIcon.
    * Used by "sidebar" and "messages" variants to fill the container
@@ -75,6 +78,13 @@ const VARIANT_CONFIG = {
     padding: 4,
     initialsClass: "text-[10px] font-medium",
   },
+  "login-hero": {
+    /** Large logo for gradient+logo hero fallback on the login page */
+    size: 64,
+    radius: 8,
+    padding: 4,
+    initialsClass: "text-xl font-semibold",
+  },
 } as const;
 
 /** Initials fallback colours (project standard) */
@@ -110,8 +120,8 @@ export function CompanyLogo({
 
   const isMessages = variant === "messages";
   const isSidebar = variant === "sidebar";
-
   const isLogin = variant === "login";
+  const isLoginHero = variant === "login-hero";
 
   // White-logo detection: the logo truly needs a dark container when BOTH:
   //   1. squareIconBg is explicitly light (the image background is white)
@@ -128,6 +138,7 @@ export function CompanyLogo({
   // contrast-fill background for a white logo, give it 4px so the logo
   // doesn't touch the container edges.
   const needsContrastFill = isLogin && logoUrl && hasWhiteLogo;
+  // login-hero always uses its base padding (4px) — the frosted container handles contrast
   const padding = needsContrastFill ? 4 : basePadding;
 
   const initials = companyName.slice(0, 2).toUpperCase();
@@ -167,6 +178,8 @@ export function CompanyLogo({
           if (hasWhiteLogo) return darkContrastFill;
           return squareIconBg ?? NEAR_WHITE;
         }
+        // login-hero → always transparent (parent provides frosted-glass bg)
+        if (isLoginHero) return "transparent";
         // login
         if (hasWhiteLogo) return darkContrastFill;
         return squareIconBg ?? "transparent";

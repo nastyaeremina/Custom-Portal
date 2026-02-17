@@ -117,15 +117,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     );
 
     // ── Scraped hero fallback ───────────────────────────────────────────
-    // Run when OG image failed OR when OG image passed but is text-heavy
-    // (we still want to look for a photo-like alternative).
-    let scrapedHeroResult: ScrapedHeroEvaluation | null = null;
-    const ogIsTextHeavy =
+    // Run when OG image failed or is not hero-fit (text-heavy, dark, etc.)
+    const ogIsHeroFit =
       ogHeroResult.passed &&
       ogHeroResult.processedImage &&
-      ogHeroResult.processedImage.textLikelihood >= 30;
+      ogHeroResult.processedImage.heroFit;
 
-    if (!ogHeroResult.passed || ogIsTextHeavy) {
+    let scrapedHeroResult: ScrapedHeroEvaluation | null = null;
+
+    if (!ogIsHeroFit) {
       scrapedHeroResult = await evaluateScrapedHeroes(
         scrapedData.images,
         scrapedData.ogImage
@@ -135,7 +135,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         `[scraped-hero] ${domain} → ${scrapedHeroResult.passed ? "PASS" : "FAIL"} ` +
           `(considered: ${scrapedHeroResult.candidatesConsidered}, tried: ${scrapedHeroResult.candidatesTried}` +
           `${scrapedHeroResult.score ? `, total=${scrapedHeroResult.score.total}` : ""}` +
-          `${ogIsTextHeavy ? ", reason=OG was text-heavy, looking for photo" : ""})`
+          `${ogHeroResult.passed && !ogIsHeroFit ? ", reason=OG not hero-fit" : ""})`
       );
     }
 
@@ -147,61 +147,30 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     let socialImage: string | null = null;
     let dalleImageUrl: string | null = null;
 
-    // Login image: website OG > scraped heroes > discipline library > gradient
+    // Login image: hero-fit website image → gradient + logo fallback
     let loginImage: string | null = null;
     let loginImageSource: string;
     let loginImageOrientation: "landscape" | "portrait" | "square" | null = null;
     let loginImageType: "text_heavy" | "photo" | null = null;
     let loginImageEdgeColor: string | null = null;
 
-    // Photo-preference: if the OG image passed but is text-heavy and we found
-    // a photo-like scraped hero, prefer the scraped photo.
-    const scrapedIsPhoto =
-      scrapedHeroResult?.passed &&
-      scrapedHeroResult.processedImage &&
-      scrapedHeroResult.processedImage.textLikelihood < 30;
+    // Check hero-fit candidates: OG first, then scraped
+    const heroFitImage =
+      (ogIsHeroFit && ogHeroResult.processedImage) ? ogHeroResult.processedImage :
+      (scrapedHeroResult?.passed && scrapedHeroResult.processedImage?.heroFit) ? scrapedHeroResult.processedImage :
+      null;
 
-    if (ogIsTextHeavy && scrapedIsPhoto && scrapedHeroResult!.processedImage) {
-      // Scraped photo beats text-heavy OG
-      loginImage = scrapedHeroResult!.processedImage!.dataUrl;
-      loginImageOrientation = scrapedHeroResult!.processedImage!.orientation;
-      loginImageType = scrapedHeroResult!.processedImage!.imageType;
-      loginImageEdgeColor = scrapedHeroResult!.processedImage!.edgeColor;
+    if (heroFitImage) {
+      loginImage = heroFitImage.dataUrl;
+      loginImageOrientation = heroFitImage.orientation;
+      loginImageType = heroFitImage.imageType;
+      loginImageEdgeColor = heroFitImage.edgeColor;
       loginImageSource = "website";
-      console.log(`[hero-select] preferred scraped photo over text-heavy OG`);
-    } else if (ogHeroResult.passed && ogHeroResult.processedImage) {
-      loginImage = ogHeroResult.processedImage.dataUrl;
-      loginImageOrientation = ogHeroResult.processedImage.orientation;
-      loginImageType = ogHeroResult.processedImage.imageType;
-      loginImageEdgeColor = ogHeroResult.processedImage.edgeColor;
-      loginImageSource = "website";
-    } else if (scrapedHeroResult?.passed && scrapedHeroResult.processedImage) {
-      loginImage = scrapedHeroResult.processedImage.dataUrl;
-      loginImageOrientation = scrapedHeroResult.processedImage.orientation;
-      loginImageType = scrapedHeroResult.processedImage.imageType;
-      loginImageEdgeColor = scrapedHeroResult.processedImage.edgeColor;
-      loginImageSource = "website";
-    } else if (heroSelection.selected) {
-      loginImage = heroSelection.imageUrl;
-      loginImageSource = "discipline";
+      console.log(`[hero-select] using hero-fit website image`);
     } else {
-      loginImage = null; // filled by gradient later
+      loginImage = null;
       loginImageSource = "gradient";
-    }
-
-    // ── Process discipline/generic library images ──
-    if (loginImage && (loginImageSource === "discipline" || loginImageSource === "generic")) {
-      try {
-        const heroPath = path.join(process.cwd(), "public", loginImage);
-        const heroBuffer = fs.readFileSync(heroPath);
-        const heroResult = await prepareHeroImage(heroBuffer);
-        loginImage = heroResult.dataUrl;
-        loginImageOrientation = heroResult.orientation;
-        loginImageType = heroResult.imageType;
-        loginImageEdgeColor = heroResult.edgeColor;
-      } catch (error) {
-        console.error("Error processing library hero:", error);
-      }
+      console.log(`[hero-select] no hero-fit image → gradient + logo fallback`);
     }
 
     // Process square icon (from favicon) + extract dominant background
@@ -337,6 +306,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         loginImageOrientation,
         loginImageType,
         loginImageEdgeColor,
+        loginGradientImage: dalleImageUrl,
         dashboardImage: dalleImageUrl,
         socialImage,
         rawFaviconUrl: scrapedData.favicon,

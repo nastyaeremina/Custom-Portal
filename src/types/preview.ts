@@ -87,9 +87,11 @@ export interface PreviewImages {
   loginHeroImageUrl: string | null;
   loginImageOrientation: "landscape" | "portrait" | "square" | null;
   loginImageType: "text_heavy" | "photo" | null;
-  /** Dominant edge color (hex) of the login hero image. Used as letterbox
-   *  background behind contain-fitted text-heavy images. */
+  /** Dominant edge color (hex) of the login hero image. */
   loginImageEdgeColor: string | null;
+  /** Gradient image used as login hero fallback when no photo hero is available.
+   *  Shown with centered company logo for a premium look. */
+  loginGradientImage: string | null;
 
   /**
    * Dashboard screen hero / banner image.
@@ -170,6 +172,7 @@ export function toPreviewPayload(
       loginImageOrientation: data.images.loginImageOrientation ?? null,
       loginImageType: data.images.loginImageType ?? null,
       loginImageEdgeColor: data.images.loginImageEdgeColor ?? null,
+      loginGradientImage: data.images.loginGradientImage ?? null,
       dashboardHeroImageUrl: data.images.dashboardImage,
       socialImageUrl: data.images.socialImage,
     },

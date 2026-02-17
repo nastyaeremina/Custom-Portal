@@ -20,8 +20,10 @@ import type { Discipline, DisciplineResult } from "./detector";
 
 // ── Configuration ──────────────────────────────────────────────────
 
-/** Minimum confidence to use a discipline library image */
-const DISCIPLINE_CONFIDENCE_THRESHOLD = 0.55;
+/** Minimum confidence to use a discipline library image.
+ *  Raised to 0.85 — only use discipline images when the detector
+ *  is highly confident, to avoid mismatched stock photos.  */
+const DISCIPLINE_CONFIDENCE_THRESHOLD = 0.85;
 
 /**
  * Minimum confidence to use the `generic/` library.

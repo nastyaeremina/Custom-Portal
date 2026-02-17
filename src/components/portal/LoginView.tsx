@@ -10,18 +10,26 @@ interface LoginViewProps {
   loginImageOrientation?: "landscape" | "portrait" | "square" | null;
   loginImageType?: "text_heavy" | "photo" | null;
   loginImageEdgeColor?: string | null;
+  /** Gradient image used as hero fallback when no photo hero is available */
+  loginGradientImage?: string | null;
 }
 
 export function LoginView({
   branding,
   theme,
   loginHeroImageUrl,
-  loginImageOrientation,
-  loginImageType,
-  loginImageEdgeColor,
+  loginGradientImage,
 }: LoginViewProps) {
-  const { companyName, logoUrl, squareIconBg, logoDominantColor } = branding;
+  const { companyName, logoUrl, squareIconBg, logoDominantColor, fullLogoUrl } = branding;
   const { sidebarBackground, sidebarText } = theme;
+
+  // Determine what to show on the right side:
+  // 1. Hero-fit photo → full-bleed cover
+  // 2. Gradient + centered logo → premium fallback
+  // 3. Nothing → hide right panel entirely
+  const hasHeroPhoto = !!loginHeroImageUrl;
+  const hasGradientFallback = !hasHeroPhoto && !!loginGradientImage;
+  const showRightPanel = hasHeroPhoto || hasGradientFallback;
 
   return (
     <div
@@ -29,8 +37,7 @@ export function LoginView({
       style={{ fontFamily: "var(--font-portal)" }}
     >
       {/* ─── Left: Login form ─── */}
-      {/* Full width when no hero image (mobile), 45% when hero image present (desktop) */}
-      <div className={`${loginHeroImageUrl ? "w-[45%]" : "w-full"} flex flex-col justify-center px-8 py-6`}>
+      <div className={`${showRightPanel ? "w-[45%]" : "w-full"} flex flex-col justify-center px-8 py-6`}>
         {/* Company logo */}
         <div className="mb-8 flex justify-center">
           <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="login" squareIconBg={squareIconBg} logoDominantColor={logoDominantColor} sidebarBackground={sidebarBackground} />
@@ -110,43 +117,59 @@ export function LoginView({
         </div>
       </div>
 
-      {/* ─── Right: Hero image (hidden when no image provided) ─── */}
-      {loginHeroImageUrl && (
+      {/* ─── Right: Hero image or gradient+logo fallback ─── */}
+      {hasHeroPhoto && (
         <div
           className="w-[55%] relative border-l border-neutral-200 overflow-hidden"
-          style={{
-            backgroundColor:
-              loginImageType === "text_heavy" && loginImageEdgeColor
-                ? loginImageEdgeColor
-                : "#f5f5f5",
-          }}
+          style={{ backgroundColor: "#f5f5f5" }}
         >
           <img
-            src={loginHeroImageUrl}
+            src={loginHeroImageUrl!}
             alt="Login background"
             className="w-full h-full"
-            style={
-              loginImageType === "text_heavy"
-                ? {
-                    /* Preserve full width — no horizontal cropping so text is never cut.
-                       Vertical letterboxing is filled by the edge-color background. */
-                    objectFit: "contain",
-                    objectPosition: "center center",
-                  }
-                : {
-                    /* Photo-like: full-bleed cover crop is safe. */
-                    objectFit: "cover",
-                    objectPosition: "center center",
-                  }
-            }
+            style={{
+              objectFit: "cover",
+              objectPosition: "center center",
+            }}
           />
-          {/* Subtle bottom fade for text-heavy landscape images to soften letterbox edge */}
-          {loginImageType === "text_heavy" && loginImageOrientation === "landscape" && (
+        </div>
+      )}
+
+      {hasGradientFallback && (
+        <div
+          className="w-[55%] relative border-l border-neutral-200 overflow-hidden flex items-center justify-center"
+          style={{ backgroundColor: "#f5f5f5" }}
+        >
+          {/* Gradient background — full bleed */}
+          <img
+            src={loginGradientImage!}
+            alt=""
+            className="absolute inset-0 w-full h-full"
+            style={{
+              objectFit: "cover",
+              objectPosition: "center center",
+            }}
+          />
+          {/* Centered company logo overlay */}
+          <div className="relative z-10 flex items-center justify-center">
             <div
-              className="absolute inset-x-0 bottom-0 h-[25%] pointer-events-none"
-              style={{ background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)" }}
-            />
-          )}
+              className="rounded-[8px] p-3 flex items-center justify-center"
+              style={{
+                backgroundColor: "rgba(255, 255, 255, 0.92)",
+                backdropFilter: "blur(8px)",
+                boxShadow: "0 2px 12px rgba(0,0,0,0.08)",
+              }}
+            >
+              <CompanyLogo
+                logoUrl={fullLogoUrl || logoUrl}
+                companyName={companyName}
+                variant="login-hero"
+                squareIconBg={squareIconBg}
+                logoDominantColor={logoDominantColor}
+                sidebarBackground={sidebarBackground}
+              />
+            </div>
+          </div>
         </div>
       )}
     </div>

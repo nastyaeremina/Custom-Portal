@@ -156,6 +156,7 @@ export default function Home() {
                     loginImageOrientation: event.data?.images?.loginImageOrientation ?? prev?.images?.loginImageOrientation ?? null,
                     loginImageType: event.data?.images?.loginImageType ?? prev?.images?.loginImageType ?? null,
                     loginImageEdgeColor: event.data?.images?.loginImageEdgeColor ?? prev?.images?.loginImageEdgeColor ?? null,
+                    loginGradientImage: event.data?.images?.loginGradientImage ?? prev?.images?.loginGradientImage ?? null,
                     dashboardImage: event.data?.images?.dashboardImage ?? prev?.images?.dashboardImage ?? null,
                     socialImage: event.data?.images?.socialImage ?? prev?.images?.socialImage ?? null,
                     rawFaviconUrl: event.data?.images?.rawFaviconUrl ?? prev?.images?.rawFaviconUrl ?? null,

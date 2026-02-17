@@ -141,6 +141,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
 
     const urls = [
       payload.images.loginHeroImageUrl,
+      payload.images.loginGradientImage,
       payload.images.dashboardHeroImageUrl,
       payload.branding.logoUrl,
     ].filter((u): u is string => !!u);
@@ -463,6 +464,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
                         loginImageOrientation={payload.images.loginImageOrientation}
                         loginImageType={payload.images.loginImageType}
                         loginImageEdgeColor={payload.images.loginImageEdgeColor}
+                        loginGradientImage={payload.images.loginGradientImage}
                       />
                     )}
                     {screen.id === "home" && (

@@ -461,6 +461,8 @@ export interface HeroClassification {
   confidence: number; // 0.0–1.0
   /** Raw text-likelihood score (0–100). Higher = more text-heavy. */
   textLikelihood: number;
+  /** Mean pixel luminance (0–255). Dark marketing banners typically < 50. */
+  meanLuminance: number;
   signals: Record<string, number>;
 }
 
@@ -471,9 +473,42 @@ export interface HeroImageResult {
   confidence: number;
   /** Raw text-likelihood score from the classifier (0–100). Higher = more text-heavy. */
   textLikelihood: number;
-  /** Dominant edge color (hex) sampled from image borders. Used as background
-   *  behind contain-fitted text-heavy images so letterboxing blends in. */
+  /** Mean pixel luminance (0–255). */
+  meanLuminance: number;
+  /** Dominant edge color (hex) sampled from image borders. */
   edgeColor: string;
+  /** Whether this image passes the hero fitness gate (authentic photo, safe for cover crop). */
+  heroFit: boolean;
+}
+
+// ─── Hero fitness thresholds ──────────────────────────────────────────────────
+
+/** Minimum mean luminance (0-255) for a hero image. Dark marketing banners fail this. */
+const MIN_HERO_LUMINANCE = 50;
+
+/** Maximum background uniformity for hero fitness. Large solid areas = marketing panel. */
+const MAX_HERO_BG_UNIFORMITY = 0.50;
+
+/**
+ * Check if a classified hero image is fit for full-bleed cover display.
+ *
+ * Only authentic photographic content passes. Rejects:
+ * - Text-heavy images (marketing banners, UI screenshots)
+ * - Dark images (marketing panels, promo graphics)
+ * - High-uniformity images (illustrations on flat backgrounds)
+ * - Monochrome-dark images (dark branded panels)
+ */
+export function isHeroFit(classification: HeroClassification): boolean {
+  const { textLikelihood, meanLuminance, signals } = classification;
+  const bgUniformity = signals.bgUniformity ?? 0;
+  const satStd = signals.satStd ?? 1;
+
+  return (
+    textLikelihood < TEXT_HEAVY_THRESHOLD &&
+    meanLuminance >= MIN_HERO_LUMINANCE &&
+    bgUniformity <= MAX_HERO_BG_UNIFORMITY &&
+    !(satStd < 0.08 && meanLuminance < 80)
+  );
 }
 
 /**
@@ -494,6 +529,7 @@ async function classifyHeroImage(buffer: Buffer): Promise<HeroClassification> {
       type: "text_heavy",
       confidence: 0.85,
       textLikelihood: 80,
+      meanLuminance: 128, // unknown — assume mid
       signals: { earlyExit: 1, aspect: aspectRatio },
     };
   }
@@ -502,6 +538,7 @@ async function classifyHeroImage(buffer: Buffer): Promise<HeroClassification> {
       type: "photo",
       confidence: 0.80,
       textLikelihood: 10,
+      meanLuminance: 128, // unknown — assume mid
       signals: { earlyExit: 2, aspect: aspectRatio },
     };
   }
@@ -518,6 +555,13 @@ async function classifyHeroImage(buffer: Buffer): Promise<HeroClassification> {
     const h = info.height;
     const ch = info.channels;
     const totalPixels = w * h;
+
+    // ── Mean luminance (ITU-R BT.601) ──
+    let lumSum = 0;
+    for (let i = 0; i < data.length; i += ch) {
+      lumSum += data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    }
+    const meanLuminance = Math.round(lumSum / totalPixels);
 
     // ── Signal 1: High-contrast edge ratio ──
     // Text/UI has many sharp edges (gradient > 40); photos have gradual transitions
@@ -693,18 +737,27 @@ async function classifyHeroImage(buffer: Buffer): Promise<HeroClassification> {
       textScore,
     };
 
+    const result: HeroClassification = {
+      type: isTextHeavy ? "text_heavy" : "photo",
+      confidence,
+      textLikelihood: textScore,
+      meanLuminance,
+      signals,
+    };
+    const fit = isHeroFit(result);
+
     console.log(
       `[hero-type] ${origW}×${origH} → ${isTextHeavy ? "TEXT_HEAVY" : "PHOTO"} ` +
         `(conf=${confidence.toFixed(2)}) ` +
         `highContrast=${highContrastRatio.toFixed(2)} bgUniform=${bgUniformity.toFixed(2)} ` +
         `hvBias=${hvBias.toFixed(2)} colors=${uniqueColors} satStd=${satStd.toFixed(2)} ` +
         `spread=${(spread * 100).toFixed(0)}% borderRatio=${borderRatio.toFixed(2)} ` +
-        `score=${textScore}`
+        `lum=${meanLuminance} score=${textScore} heroFit=${fit}`
     );
 
-    return { type: isTextHeavy ? "text_heavy" : "photo", confidence, textLikelihood: textScore, signals };
+    return result;
   } catch {
-    return { type: "photo", confidence: 0.5, textLikelihood: 0, signals: { error: 1 } };
+    return { type: "photo", confidence: 0.5, textLikelihood: 0, meanLuminance: 128, signals: { error: 1 } };
   }
 }
 
@@ -800,7 +853,9 @@ export async function prepareHeroImage(buffer: Buffer): Promise<HeroImageResult>
     imageType: classification.type,
     confidence: classification.confidence,
     textLikelihood: classification.textLikelihood,
+    meanLuminance: classification.meanLuminance,
     edgeColor,
+    heroFit: isHeroFit(classification),
   };
 }
 
@@ -813,18 +868,15 @@ export interface ScrapedHeroEvaluation extends OgHeroEvaluation {
   candidatesTried: number;
 }
 
-/** Below this textLikelihood score, an image is confidently photo-like. */
-const PHOTO_PREFERRED_THRESHOLD = 30;
-
 /**
  * Evaluate scraped hero images as login hero candidates.
  *
  * Filters, deduplicates, and ranks hero images by size, then tries the top
  * candidates through the same quality gate as OG images.
  *
- * **Photo preference:** Collects all passing candidates (up to maxTries) and
- * prefers photo-like images (textLikelihood < 30). Only falls back to a
- * text-heavy image if no photo-like option passes the quality gate.
+ * **Hero fitness:** Only accepts images that pass `isHeroFit` (authentic
+ * photographic content). Marketing banners, dark images, and text-heavy
+ * images are rejected.
  *
  * Only runs when the OG image has already failed — so this adds zero cost to
  * the happy path.
@@ -882,9 +934,8 @@ export async function evaluateScrapedHeroes(
   let bestFailedScore: OgHeroScore | null = null;
   let bestFailedUrl: string | null = null;
 
-  // Passing candidates: { result, index }
-  let bestPhoto: { result: OgHeroEvaluation; triedIndex: number } | null = null;
-  let bestTextHeavy: { result: OgHeroEvaluation; triedIndex: number } | null = null;
+  // Best hero-fit candidate
+  let bestFit: { result: OgHeroEvaluation; triedIndex: number } | null = null;
 
   for (let i = 0; i < candidates.length; i++) {
     const candidate = candidates[i];
@@ -900,19 +951,19 @@ export async function evaluateScrapedHeroes(
       );
     }
     if (result.passed && result.processedImage) {
-      const tl = result.processedImage.textLikelihood;
+      const fit = result.processedImage.heroFit;
       console.log(
-        `[scraped-hero] candidate ${i + 1} textLikelihood=${tl} → ${tl < PHOTO_PREFERRED_THRESHOLD ? "PHOTO" : "TEXT_HEAVY"}`
+        `[scraped-hero] candidate ${i + 1} heroFit=${fit} ` +
+          `(textLikelihood=${result.processedImage.textLikelihood}, ` +
+          `lum=${result.processedImage.meanLuminance})`
       );
 
-      if (tl < PHOTO_PREFERRED_THRESHOLD) {
-        // Found a photo-like winner — use immediately
-        bestPhoto = { result, triedIndex: i };
+      if (fit) {
+        // Found a hero-fit winner — use immediately
+        bestFit = { result, triedIndex: i };
         break;
-      } else if (!bestTextHeavy) {
-        // First passing text-heavy — keep as fallback, continue looking for photos
-        bestTextHeavy = { result, triedIndex: i };
       }
+      // Not hero-fit — don't use (no text-heavy fallback anymore)
     } else {
       // Track the best-scoring failure for debug output
       if (result.score && (!bestFailedScore || result.score.total > bestFailedScore.total)) {
@@ -922,17 +973,15 @@ export async function evaluateScrapedHeroes(
     }
   }
 
-  // Prefer photo-like, fall back to text-heavy
-  const winner = bestPhoto ?? bestTextHeavy;
-  if (winner) {
+  if (bestFit) {
     return {
-      ...winner.result,
+      ...bestFit.result,
       candidatesConsidered: prefiltered.length,
-      candidatesTried: winner.triedIndex + 1,
+      candidatesTried: bestFit.triedIndex + 1,
     };
   }
 
-  // None passed — return the best failed score for debug visibility
+  // None passed hero fitness — return the best failed score for debug visibility
   return {
     ogImageUrl: bestFailedUrl,
     passed: false,
