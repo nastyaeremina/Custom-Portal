@@ -25,7 +25,7 @@ const QUANTIZE_STEP = 16;
 const THUMBNAIL_SIZE = 50;
 
 /** Weighted total must be ≥ this to pass. */
-const PASS_THRESHOLD = 70;
+const PASS_THRESHOLD = 65;
 
 /** Minimum mean edge strength (0–255 scale). Below this = flat/logo-on-solid. */
 const MIN_EDGE_DENSITY = 8;

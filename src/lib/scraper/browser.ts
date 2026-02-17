@@ -92,6 +92,32 @@ async function setupPage(browser: Browser, ua: string): Promise<Page> {
   return page;
 }
 
+/**
+ * Wait for most visible images to finish loading.
+ * Framer, React, and Next.js sites often render images asynchronously
+ * after the initial `networkidle2` fires.  This polls `img.complete`
+ * for up to 3 seconds so `naturalWidth`/`naturalHeight` are populated
+ * when `extractHeroImages` runs.
+ */
+async function waitForImages(page: Page): Promise<void> {
+  try {
+    await page.waitForFunction(
+      () => {
+        const imgs = Array.from(document.images);
+        if (imgs.length === 0) return true;
+        const loaded = imgs.filter(
+          (img) => img.complete || img.naturalWidth > 0
+        ).length;
+        // Pass when ≥80% of images are done (avoids stalling on broken imgs)
+        return loaded / imgs.length >= 0.8;
+      },
+      { timeout: 3000 }
+    );
+  } catch {
+    // Timeout is fine — we tried our best; proceed with whatever loaded
+  }
+}
+
 export async function createPage(browser: Browser, url: string): Promise<Page> {
   // Try each user agent; retry on 4xx (typically 403 from WAFs)
   for (let i = 0; i < USER_AGENTS.length; i++) {
@@ -107,6 +133,9 @@ export async function createPage(browser: Browser, url: string): Promise<Page> {
 
     // Usable response (2xx/3xx or server errors that won't change with a different UA)
     if (status === 0 || status < 400 || status >= 500) {
+      // Wait for images to finish loading (helps Framer/React/Next.js sites
+      // where images render asynchronously after network idle)
+      await waitForImages(page);
       return page;
     }
 

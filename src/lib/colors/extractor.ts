@@ -78,7 +78,13 @@ export async function extractColorsFromImage(
       palette: sortedColors,
     };
   } catch (error) {
-    console.error("Error extracting colors from image:", error);
+    // ICO / unsupported formats are common (e.g. favicon.ico) — log quietly
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("unsupported image format")) {
+      console.warn("[extractColorsFromImage] Skipping unsupported image format (likely ICO)");
+    } else {
+      console.error("Error extracting colors from image:", error);
+    }
     return {
       dominant: "#333333",
       palette: ["#333333"],
@@ -149,7 +155,13 @@ export async function extractColorsWithDetails(
 
     return colors;
   } catch (error) {
-    console.error("Error extracting colors with details:", error);
+    // ICO / unsupported formats are common (e.g. favicon.ico) — log quietly
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("unsupported image format")) {
+      console.warn("[extractColorsWithDetails] Skipping unsupported image format (likely ICO)");
+    } else {
+      console.error("Error extracting colors with details:", error);
+    }
     return [];
   }
 }

@@ -590,20 +590,94 @@ export async function extractHeroImages(page: Page): Promise<ScrapedImage[]> {
       width: number;
       height: number;
     }> = [];
+    const seen = new Set<string>();
 
-    // Look for large images
+    /** Add a candidate if the URL is new and non-empty. */
+    function add(url: string, w: number, h: number) {
+      if (!url || url === "about:blank" || seen.has(url)) return;
+      seen.add(url);
+      candidates.push({ url, width: w, height: h });
+    }
+
+    /**
+     * Parse the largest URL from a `srcset` string.
+     * Format: "url 600w, url 1200w" or "url 1x, url 2x"
+     */
+    function bestFromSrcset(srcset: string): string | null {
+      const entries = srcset
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      let best: { url: string; size: number } | null = null;
+      for (const entry of entries) {
+        const parts = entry.split(/\s+/);
+        if (parts.length < 1) continue;
+        const url = parts[0];
+        const descriptor = parts[1] ?? "0w";
+        const size = parseFloat(descriptor) || 0;
+        if (!best || size > best.size) {
+          best = { url, size };
+        }
+      }
+      return best?.url ?? null;
+    }
+
+    // ─── Strategy 1: <img> elements with loaded natural dimensions ───
     document.querySelectorAll("img").forEach((img) => {
       const imgEl = img as HTMLImageElement;
+
+      // 1a. Fully-loaded large images (original logic)
       if (imgEl.naturalWidth >= 400 && imgEl.naturalHeight >= 300) {
-        candidates.push({
-          url: imgEl.src,
-          width: imgEl.naturalWidth,
-          height: imgEl.naturalHeight,
-        });
+        add(imgEl.src, imgEl.naturalWidth, imgEl.naturalHeight);
+      }
+
+      // 1b. Lazy-loaded images: check data-src, data-lazy-src, data-original
+      //     These may not have naturalWidth yet because the real src hasn't loaded.
+      const lazySrc =
+        imgEl.getAttribute("data-src") ||
+        imgEl.getAttribute("data-lazy-src") ||
+        imgEl.getAttribute("data-original");
+      if (lazySrc && lazySrc !== imgEl.src) {
+        // Use HTML width/height attributes or rendered size as dimension estimate
+        const w = imgEl.naturalWidth || imgEl.width || parseInt(imgEl.getAttribute("width") ?? "0", 10);
+        const h = imgEl.naturalHeight || imgEl.height || parseInt(imgEl.getAttribute("height") ?? "0", 10);
+        // Resolve relative URLs
+        try {
+          const resolved = new URL(lazySrc, window.location.href).href;
+          add(resolved, w, h);
+        } catch { /* invalid URL, skip */ }
+      }
+
+      // 1c. srcset — pick the largest source
+      const srcset = imgEl.getAttribute("srcset") || imgEl.getAttribute("data-srcset");
+      if (srcset) {
+        const bestUrl = bestFromSrcset(srcset);
+        if (bestUrl && bestUrl !== imgEl.src) {
+          try {
+            const resolved = new URL(bestUrl, window.location.href).href;
+            const w = imgEl.naturalWidth || imgEl.width || 0;
+            const h = imgEl.naturalHeight || imgEl.height || 0;
+            add(resolved, w, h);
+          } catch { /* invalid URL, skip */ }
+        }
       }
     });
 
-    // Look for background images in CSS
+    // ─── Strategy 2: <picture> → <source> elements ───
+    document.querySelectorAll("picture > source").forEach((source) => {
+      const srcset = source.getAttribute("srcset");
+      if (!srcset) return;
+      const bestUrl = bestFromSrcset(srcset);
+      if (bestUrl) {
+        try {
+          const resolved = new URL(bestUrl, window.location.href).href;
+          // Dimensions unknown; the quality gate will check after fetch
+          add(resolved, 0, 0);
+        } catch { /* skip */ }
+      }
+    });
+
+    // ─── Strategy 3: Inline-style background images (original logic) ───
     const elementsWithBg = document.querySelectorAll(
       '[style*="background-image"], [style*="background:"]'
     );
@@ -611,13 +685,30 @@ export async function extractHeroImages(page: Page): Promise<ScrapedImage[]> {
       const style = (el as HTMLElement).style.backgroundImage;
       const match = style.match(/url\(['"]?([^'"]+)['"]?\)/);
       if (match && match[1]) {
-        candidates.push({
-          url: match[1],
-          width: 0,
-          height: 0,
-        });
+        add(match[1], 0, 0);
       }
     });
+
+    // ─── Strategy 4: Computed CSS background-image on large elements ───
+    // Catches backgrounds set via stylesheets (not inline), common on hero sections.
+    const heroSelectors = [
+      "section", "[class*='hero']", "[class*='banner']", "[class*='cover']",
+      "[class*='background']", "[role='banner']", "main > div:first-child",
+    ];
+    try {
+      document.querySelectorAll(heroSelectors.join(", ")).forEach((el) => {
+        const htmlEl = el as HTMLElement;
+        // Only check sizeable elements (likely hero areas)
+        if (htmlEl.offsetWidth < 400 || htmlEl.offsetHeight < 200) return;
+        const computed = window.getComputedStyle(htmlEl);
+        const bgImage = computed.backgroundImage;
+        if (!bgImage || bgImage === "none") return;
+        const match = bgImage.match(/url\(['"]?([^'"]+)['"]?\)/);
+        if (match && match[1]) {
+          add(match[1], htmlEl.offsetWidth, htmlEl.offsetHeight);
+        }
+      });
+    } catch { /* computed styles can throw in edge cases */ }
 
     return candidates;
   });
