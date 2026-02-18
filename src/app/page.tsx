@@ -121,9 +121,12 @@ export default function Home() {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
+        if (!done) {
+          buffer += decoder.decode(value, { stream: true });
+        } else {
+          // Flush the TextDecoder's internal state
+          buffer += decoder.decode();
+        }
         const lines = buffer.split("\n\n");
         buffer = lines.pop() || "";
 
@@ -199,6 +202,8 @@ export default function Home() {
             }
           }
         }
+
+        if (done) break;
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
