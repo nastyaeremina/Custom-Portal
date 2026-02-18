@@ -1,6 +1,7 @@
 import chroma from "chroma-js";
 import sharp from "sharp";
 import { ColorPalette } from "./types";
+import { fetchImageBuffer } from "../images/processor";
 
 export interface ExtractedAccentColor {
   color: string;
@@ -214,39 +215,24 @@ export async function extractAccentFromImageUrl(
   console.log(`[extractAccentFromImageUrl] Fetching image: ${imageUrl}`);
 
   try {
-    const response = await fetch(imageUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)",
-      },
-    });
-
-    if (!response.ok) {
-      console.error(`[extractAccentFromImageUrl] Failed to fetch image: ${response.status} ${response.statusText}`);
-      return null;
-    }
-
-    const contentType = response.headers.get("content-type") || "";
-    console.log(`[extractAccentFromImageUrl] Content-Type: ${contentType}`);
-
-    // Handle SVG responses
-    if (contentType.includes("svg")) {
-      const svgText = await response.text();
-      const colors = extractColorsFromSvg(svgText);
-      if (colors.length > 0) {
-        console.log(`[extractAccentFromImageUrl] Found ${colors.length} colors from SVG`);
-        return colors[0];
-      }
-      console.log(`[extractAccentFromImageUrl] No colors found in SVG`);
-      return null;
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const buffer = await fetchImageBuffer(imageUrl);
 
     console.log(`[extractAccentFromImageUrl] Image buffer size: ${buffer.length} bytes`);
 
     if (buffer.length === 0) {
       console.error(`[extractAccentFromImageUrl] Empty image buffer`);
+      return null;
+    }
+
+    // Check if buffer is SVG (text-based)
+    const head = buffer.subarray(0, 256).toString("utf8");
+    if (head.includes("<svg") || head.includes("<?xml")) {
+      const colors = extractColorsFromSvg(buffer.toString("utf8"));
+      if (colors.length > 0) {
+        console.log(`[extractAccentFromImageUrl] Found ${colors.length} colors from SVG`);
+        return colors[0];
+      }
+      console.log(`[extractAccentFromImageUrl] No colors found in SVG`);
       return null;
     }
 
@@ -346,17 +332,7 @@ export async function extractColorsFromUrl(
   imageUrl: string
 ): Promise<ColorPalette> {
   try {
-    const response = await fetch(imageUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image: ${response.status}`);
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = await fetchImageBuffer(imageUrl);
     return extractColorsFromImage(buffer);
   } catch (error) {
     console.error("Error fetching image for color extraction:", error);

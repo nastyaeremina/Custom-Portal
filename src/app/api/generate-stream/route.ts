@@ -12,6 +12,7 @@ import {
   processFullLogo,
   processLoginImage,
   processSocialImage,
+  clearImageBufferCache,
 } from "@/lib/images/processor";
 import {
   selectBestBrandMark,
@@ -56,6 +57,8 @@ export async function POST(request: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      // Clear per-request image cache to avoid stale data between generations
+      clearImageBufferCache();
       try {
         // 1. Parse and validate input
         const body = await request.json();
@@ -90,25 +93,26 @@ export async function POST(request: NextRequest) {
           // Keep: title, description, meta, companyNameCandidates (overridden below)
         }
 
-        // 3. Extract colors from favicon/logo for palette (used for debug display)
-        let imageColors: string[] = [];
+        // 3 + 4. Extract palette colors AND accent color in parallel
+        //         (both are independent — palette uses favicon/logo for debug,
+        //          accent uses favicon + logo + link colors for brand detection)
         const colorSource = scrapedData.favicon || scrapedData.logo;
-        if (colorSource) {
-          try {
-            const palette = await extractColorsFromUrl(colorSource);
-            imageColors = palette.palette;
-          } catch (error) {
-            console.error("Error extracting colors from image:", error);
-          }
-        }
-
-        // 4. Select accent color WITH context (extracts both favicon and logo saturation)
-        const accentSelection = await selectAccentColorWithContext({
-          squareIconUrl: scrapedData.favicon,
-          logoUrl: scrapedData.logo,
-          linkButtonColors: scrapedData.linkButtonColors,
-        });
-
+        const [imageColorsResult, accentSelection] = await Promise.all([
+          colorSource
+            ? extractColorsFromUrl(colorSource)
+                .then(p => p.palette)
+                .catch((error) => {
+                  console.error("Error extracting colors from image:", error);
+                  return [] as string[];
+                })
+            : Promise.resolve([] as string[]),
+          selectAccentColorWithContext({
+            squareIconUrl: scrapedData.favicon,
+            logoUrl: scrapedData.logo,
+            linkButtonColors: scrapedData.linkButtonColors,
+          }),
+        ]);
+        const imageColors = imageColorsResult;
         const accentResult = accentSelection.result;
 
         // 5. Build extracted colors list for quality gate context
@@ -172,8 +176,31 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // ── OG hero evaluation (runs in parallel with discipline + gradient) ──
+        // ── Launch I/O-heavy promises early (all only need scraping output) ──
         const ogHeroPromise = evaluateOgHero(scrapedData.ogImage);
+
+        const fullLogoPromise = scrapedData.logo
+          ? processFullLogo(scrapedData.logo).catch((error) => {
+              console.error("Error processing full logo:", error);
+              return null;
+            })
+          : Promise.resolve(null);
+
+        const socialImagePromise = scrapedData.ogImage
+          ? processSocialImage(scrapedData.ogImage).catch((error) => {
+              console.error("Error processing social image:", error);
+              return null;
+            })
+          : Promise.resolve(null);
+
+        const brandMarkPromise = selectBestBrandMark(
+          scrapedData.favicon,
+          scrapedData.logo,
+          scrapedData.manifestIcons
+        ).catch((error) => {
+          console.error("Error in brand mark selection:", error);
+          return null;
+        });
 
         // ── Discipline detection ──────────────────────────────────────
         const disciplineResult = detectDiscipline({
@@ -451,16 +478,7 @@ export async function POST(request: NextRequest) {
         let dalleImageUrl: string | null = null;
         let dalleGenerations: DalleGeneration[] = initialDalleGenerations;
 
-        // ── Brand mark + full logo in parallel ──
-        // These are independent: brand mark evaluates favicon/manifest/logo as icon,
-        // while full logo processes the horizontal wordmark. Run concurrently.
-        const fullLogoPromise = scrapedData.logo
-          ? processFullLogo(scrapedData.logo).catch((error) => {
-              console.error("Error processing full logo:", error);
-              return null;
-            })
-          : Promise.resolve(null);
-
+        // ── Await brand mark (launched early alongside OG hero) ──
         // Helper: perceived brightness > 220 → "light".
         // Mirrors `isLightColor` in CompanyLogo.tsx.
         const _isLight = (c: string | null) => {
@@ -478,12 +496,9 @@ export async function POST(request: NextRequest) {
         let logoBgType: "light-solid" | "dark-solid" | "transparent" = "transparent";
         let containerBgChosen = "brandFill (default)";
         try {
-          brandMarkSelection = await selectBestBrandMark(
-            scrapedData.favicon,
-            scrapedData.logo,
-            scrapedData.manifestIcons
-          );
+          brandMarkSelection = await brandMarkPromise;
 
+          if (brandMarkSelection) {
           console.log(
             `[brand-mark] ${domain} → ${brandMarkSelection.selected?.source ?? "initials"} ` +
             `(score: ${brandMarkSelection.selected?.analysis?.totalScore ?? "N/A"}) ` +
@@ -526,12 +541,13 @@ export async function POST(request: NextRequest) {
               );
             }
           }
+          } // end if (brandMarkSelection)
         } catch (error) {
-          console.error("Error in brand mark selection:", error);
+          console.error("Error in brand mark processing:", error);
           brandMarkSelection = null;
         }
 
-        // Await full logo (started in parallel above)
+        // Await full logo (launched early alongside OG hero)
         fullLogo = (await fullLogoPromise) || null;
 
         // Send images event (brand mark + logo processed)
@@ -560,15 +576,8 @@ export async function POST(request: NextRequest) {
           },
         })));
 
-        // Process social image from OG (scraped source)
-        let scrapedSocialImage: string | null = null;
-        if (scrapedData.ogImage) {
-          try {
-            scrapedSocialImage = await processSocialImage(scrapedData.ogImage);
-          } catch (error) {
-            console.error("Error processing social image:", error);
-          }
-        }
+        // Await social image (launched early alongside OG hero)
+        const scrapedSocialImage = await socialImagePromise;
 
         // Send update with scraped images
         if (scrapedSocialImage) {
@@ -615,7 +624,8 @@ export async function POST(request: NextRequest) {
               companyName,
               scrapedImagesInfo,
               logoCenteredInput,
-              scrapedData.ogImage
+              scrapedData.ogImage,
+              gradientColorsForDebug  // pass pre-computed colors, skip redundant extraction
             );
 
             // Find the gradient generation for hero images

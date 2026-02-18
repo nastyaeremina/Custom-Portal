@@ -1,20 +1,39 @@
 import sharp from "sharp";
 
+// ─── Per-request image buffer cache ──────────────────────────────────────────
+// Same favicon/logo/OG image is fetched across many pipeline stages.
+// This cache deduplicates so each URL is fetched at most once per generation.
+const _imageBufferCache = new Map<string, Promise<Buffer>>();
+
+/** Clear the cache between requests (call at the start of each generation). */
+export function clearImageBufferCache(): void {
+  _imageBufferCache.clear();
+}
+
 /**
- * Fetch image from URL and return as buffer
+ * Fetch image from URL and return as buffer.
+ * Results are cached for the lifetime of a single generation request.
  */
 export async function fetchImageBuffer(url: string): Promise<Buffer> {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)",
-    },
-  });
+  const existing = _imageBufferCache.get(url);
+  if (existing) return existing;
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch image: ${response.status}`);
-  }
+  const promise = (async () => {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)",
+      },
+    });
 
-  return Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.status}`);
+    }
+
+    return Buffer.from(await response.arrayBuffer());
+  })();
+
+  _imageBufferCache.set(url, promise);
+  return promise;
 }
 
 /**

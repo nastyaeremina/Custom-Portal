@@ -13,6 +13,7 @@ import {
   processFullLogo,
   processLoginImage,
   processSocialImage,
+  clearImageBufferCache,
 } from "@/lib/images/processor";
 import { isOpenAIConfigured, generateGradientImagePublic, extractColorsFromScrapedImages, type GradientDebug } from "@/lib/images/dalle";
 import { detectDiscipline, selectHeroImage } from "@/lib/discipline";
@@ -24,6 +25,7 @@ import { generateWelcomeMessage } from "@/lib/welcome-message";
 export const maxDuration = 60; // Allow up to 60 seconds
 
 export async function POST(request: NextRequest): Promise<NextResponse<GenerateResponse>> {
+  clearImageBufferCache();
   try {
     // 1. Parse and validate input
     const body = await request.json();

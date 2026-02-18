@@ -243,37 +243,38 @@ export async function selectAccentColorWithContext(
   let logoSaturation: number | null = null;
   let selectedResult: AccentColorResult | null = null;
 
-  // Step 1: Always try to extract favicon color
-  if (sources.squareIconUrl) {
-    console.log("[selectAccentColorWithContext] Extracting favicon color...");
-    const iconColor = await extractAccentFromImageUrl(sources.squareIconUrl);
-    if (iconColor) {
-      faviconSaturation = iconColor.saturation;
-      console.log(`[selectAccentColorWithContext] Favicon saturation: ${iconColor.saturation.toFixed(2)}`);
-      if (iconColor.saturation >= 0.12 && !selectedResult) {
-        selectedResult = {
-          color: iconColor.color,
-          source: "squareIcon",
-          isHighConfidence: iconColor.isHighConfidence,
-        };
-      }
+  // Steps 1 + 2: Extract favicon and logo colors in parallel
+  // Both are always needed (for saturation metadata), so run concurrently.
+  const [iconColor, logoColor] = await Promise.all([
+    sources.squareIconUrl
+      ? extractAccentFromImageUrl(sources.squareIconUrl)
+      : Promise.resolve(null),
+    sources.logoUrl
+      ? extractAccentFromImageUrl(sources.logoUrl)
+      : Promise.resolve(null),
+  ]);
+
+  if (iconColor) {
+    faviconSaturation = iconColor.saturation;
+    console.log(`[selectAccentColorWithContext] Favicon saturation: ${iconColor.saturation.toFixed(2)}`);
+    if (iconColor.saturation >= 0.12) {
+      selectedResult = {
+        color: iconColor.color,
+        source: "squareIcon",
+        isHighConfidence: iconColor.isHighConfidence,
+      };
     }
   }
 
-  // Step 2: Always try to extract logo color (even if favicon was selected)
-  if (sources.logoUrl) {
-    console.log("[selectAccentColorWithContext] Extracting logo color...");
-    const logoColor = await extractAccentFromImageUrl(sources.logoUrl);
-    if (logoColor) {
-      logoSaturation = logoColor.saturation;
-      console.log(`[selectAccentColorWithContext] Logo saturation: ${logoColor.saturation.toFixed(2)}`);
-      if (logoColor.saturation >= 0.12 && !selectedResult) {
-        selectedResult = {
-          color: logoColor.color,
-          source: "logo",
-          isHighConfidence: logoColor.isHighConfidence,
-        };
-      }
+  if (logoColor) {
+    logoSaturation = logoColor.saturation;
+    console.log(`[selectAccentColorWithContext] Logo saturation: ${logoColor.saturation.toFixed(2)}`);
+    if (logoColor.saturation >= 0.12 && !selectedResult) {
+      selectedResult = {
+        color: logoColor.color,
+        source: "logo",
+        isHighConfidence: logoColor.isHighConfidence,
+      };
     }
   }
 

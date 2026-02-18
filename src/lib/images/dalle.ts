@@ -3,6 +3,7 @@ import chroma from "chroma-js";
 import { PortalColorScheme } from "../colors/types";
 import { DalleGeneration } from "@/types/api";
 import { extractColorsWithDetails } from "../colors/extractor";
+import { fetchImageBuffer as cachedFetchImageBuffer } from "./processor";
 
 export interface ScrapedImageInfo {
   url: string;
@@ -84,7 +85,8 @@ async function extractBackgroundColor(imageUrl: string): Promise<string | null> 
 }
 
 /**
- * Fetch an image and return as buffer
+ * Fetch an image and return as buffer.
+ * Delegates to the shared cached fetcher for HTTP URLs to avoid redundant downloads.
  */
 async function fetchImageBuffer(imageUrl: string): Promise<Buffer | null> {
   try {
@@ -101,11 +103,8 @@ async function fetchImageBuffer(imageUrl: string): Promise<Buffer | null> {
       return null;
     }
 
-    const response = await fetch(imageUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; BrandScraper/1.0)" },
-    });
-    if (!response.ok) return null;
-    return Buffer.from(await response.arrayBuffer());
+    // Use shared cached fetcher for HTTP URLs
+    return await cachedFetchImageBuffer(imageUrl);
   } catch (error) {
     console.error("Error fetching image:", error);
     return null;
@@ -981,13 +980,17 @@ export function computeGradientDebug(
 
 /**
  * Generate all four image approaches (all deterministic, no AI)
+ *
+ * @param precomputedGradientColors – if provided, skip the redundant
+ *   extractColorsFromScrapedImages call (already done in the route).
  */
 export async function generateAllDalleImages(
   colors: PortalColorScheme,
   companyName: string,
   scrapedImages: ScrapedImageInfo[],
   logoCenteredInput: LogoCenteredInput,
-  ogImageUrl?: string | null
+  ogImageUrl?: string | null,
+  precomputedGradientColors?: string[]
 ): Promise<DalleGeneration[]> {
   // Extract background color from logo (preferred) or icon
   const imageForBackground = logoCenteredInput.logoUrl || logoCenteredInput.iconUrl;
@@ -998,8 +1001,10 @@ export async function generateAllDalleImages(
   }
   backgroundColor = backgroundColor || colors.sidebarBackground;
 
-  // Extract colors from scraped images for gradient approach
-  const gradientColors = await extractColorsFromScrapedImages(scrapedImages);
+  // Use pre-computed gradient colors if available, otherwise extract
+  const gradientColors = precomputedGradientColors && precomputedGradientColors.length > 0
+    ? precomputedGradientColors
+    : await extractColorsFromScrapedImages(scrapedImages);
   const finalGradientColors = gradientColors.length > 0
     ? gradientColors
     : [colors.accent, colors.sidebarBackground];
