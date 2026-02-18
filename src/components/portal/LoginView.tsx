@@ -1,7 +1,32 @@
 "use client";
 
 import type { PreviewBranding, PreviewTheme } from "@/types/preview";
-import { CompanyLogo } from "./CompanyLogo";
+import { CompanyLogo, isLightColor } from "./CompanyLogo";
+
+/** Static list of generic hero images (from /public/assets/login-hero/generic/). */
+const GENERIC_HERO_IMAGES = [
+  "/assets/login-hero/generic/1.png",
+  "/assets/login-hero/generic/2.png",
+  "/assets/login-hero/generic/3.png",
+  "/assets/login-hero/generic/5.png",
+  "/assets/login-hero/generic/6.png",
+  "/assets/login-hero/generic/9.png",
+  "/assets/login-hero/generic/unsplash_7Y0NshQLohk.png",
+  "/assets/login-hero/generic/unsplash_GJKx5lhwU3M.png",
+  "/assets/login-hero/generic/unsplash_J7en76WCGdU.png",
+  "/assets/login-hero/generic/unsplash_kUHfMW8awpE.png",
+  "/assets/login-hero/generic/unsplash_pAyN5zqdqDo.png",
+];
+
+/** Simple string hash → deterministic index into GENERIC_HERO_IMAGES. */
+function pickGenericHero(companyName: string): string {
+  let h = 0;
+  for (let i = 0; i < companyName.length; i++) {
+    h = ((h << 5) - h + companyName.charCodeAt(i)) | 0;
+  }
+  const idx = Math.abs(h) % GENERIC_HERO_IMAGES.length;
+  return GENERIC_HERO_IMAGES[idx];
+}
 
 interface LoginViewProps {
   branding: PreviewBranding;
@@ -20,16 +45,25 @@ export function LoginView({
   loginHeroImageUrl,
   loginGradientImage,
 }: LoginViewProps) {
-  const { companyName, logoUrl, squareIconBg, logoDominantColor, fullLogoUrl } = branding;
+  const { companyName, logoUrl, squareIconBg, logoDominantColor, squareIconFg, fullLogoUrl } = branding;
   const { sidebarBackground, sidebarText } = theme;
 
   // Determine what to show on the right side:
   // 1. Hero-fit photo → full-bleed cover
-  // 2. Gradient + centered logo → premium fallback
-  // 3. Nothing → hide right panel entirely
+  // 2. Gradient/brand-bg + centered logo → premium fallback
+  // 3. Generic stock photo → no confident brand to show
+  const heroLogoUrl = fullLogoUrl || logoUrl;
+  // Low confidence: company name fell back to "Company" — we couldn't identify the brand
+  const lowConfidence = companyName === "Company";
   const hasHeroPhoto = !!loginHeroImageUrl;
-  const hasGradientFallback = !hasHeroPhoto && !!loginGradientImage;
-  const showRightPanel = hasHeroPhoto || hasGradientFallback;
+  // Gradient + logo overlay — need gradient, any logo, and confident brand
+  const hasGradientWithLogo = !hasHeroPhoto && !!loginGradientImage && !!heroLogoUrl && !lowConfidence;
+  // When only squareIcon (no fullLogo), use squareIconBg as solid bg instead of gradient
+  const useSquareIconHero = hasGradientWithLogo && !fullLogoUrl;
+  // Generic stock photo fallback — when no hero photo and no gradient+logo combo
+  const hasGenericFallback = !hasHeroPhoto && !hasGradientWithLogo;
+  const genericHeroUrl = hasGenericFallback ? pickGenericHero(companyName) : null;
+  const showRightPanel = hasHeroPhoto || hasGradientWithLogo || hasGenericFallback;
 
   return (
     <div
@@ -40,7 +74,7 @@ export function LoginView({
       <div className={`${showRightPanel ? "w-[45%]" : "w-full"} flex flex-col justify-center px-8 py-6`}>
         {/* Company logo */}
         <div className="mb-8 flex justify-center">
-          <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="login" squareIconBg={squareIconBg} logoDominantColor={logoDominantColor} sidebarBackground={sidebarBackground} />
+          <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="login" squareIconBg={squareIconBg} logoDominantColor={logoDominantColor} squareIconFg={squareIconFg} sidebarBackground={sidebarBackground} />
         </div>
 
         {/* Form fields */}
@@ -135,41 +169,107 @@ export function LoginView({
         </div>
       )}
 
-      {hasGradientFallback && (
+      {hasGradientWithLogo && (
         <div
           className="w-[55%] relative border-l border-neutral-200 overflow-hidden flex items-center justify-center"
+          style={{
+            backgroundColor: useSquareIconHero && squareIconBg
+              ? squareIconBg
+              : "#f5f5f5",
+          }}
+        >
+          {/* Background: solid squareIconBg when using square icon, gradient otherwise */}
+          {!useSquareIconHero && (
+            <img
+              src={loginGradientImage!}
+              alt=""
+              className="absolute inset-0 w-full h-full"
+              style={{
+                objectFit: "cover",
+                objectPosition: "center center",
+              }}
+            />
+          )}
+          {/* Centered company logo */}
+          {(() => {
+            if (useSquareIconHero) {
+              // Square icon on matching bg — edges blend, no sticker look
+              return (
+                <div
+                  className="relative z-10 flex items-center justify-center"
+                  style={{ width: "70%", height: "50%" }}
+                >
+                  <img
+                    src={heroLogoUrl!}
+                    alt={companyName}
+                    style={{
+                      maxWidth: "100%",
+                      maxHeight: "100%",
+                      minWidth: 120,
+                      objectFit: "contain",
+                    }}
+                  />
+                </div>
+              );
+            }
+
+            // Full logo (wordmark) on gradient
+            const hasWhiteLogo =
+              !!squareIconBg &&
+              isLightColor(squareIconBg) &&
+              isLightColor(logoDominantColor);
+
+            const backdropStyle = hasWhiteLogo
+              ? {
+                  background:
+                    sidebarBackground && !isLightColor(sidebarBackground)
+                      ? `radial-gradient(circle, ${sidebarBackground}33 0%, transparent 70%)`
+                      : "radial-gradient(circle, rgba(0,0,0,0.10) 0%, transparent 70%)",
+                  padding: 24,
+                }
+              : {};
+
+            return (
+              <div
+                className="relative z-10 flex items-center justify-center"
+                style={{
+                  width: "70%",
+                  height: "50%",
+                  ...backdropStyle,
+                }}
+              >
+                <img
+                  src={fullLogoUrl!}
+                  alt={companyName}
+                  style={{
+                    maxWidth: "100%",
+                    maxHeight: "100%",
+                    minWidth: 120,
+                    objectFit: "contain",
+                    filter:
+                      "drop-shadow(0 0 16px rgba(255,255,255,0.5)) drop-shadow(0 2px 4px rgba(0,0,0,0.08))",
+                  }}
+                />
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {hasGenericFallback && genericHeroUrl && (
+        <div
+          className="w-[55%] relative border-l border-neutral-200 overflow-hidden"
           style={{ backgroundColor: "#f5f5f5" }}
         >
-          {/* Gradient background — full bleed */}
           <img
-            src={loginGradientImage!}
-            alt=""
-            className="absolute inset-0 w-full h-full"
+            src={genericHeroUrl}
+            alt="Login background"
+            className="w-full h-full"
             style={{
               objectFit: "cover",
               objectPosition: "center center",
             }}
           />
-          {/* Centered company logo overlay */}
-          <div className="relative z-10 flex items-center justify-center">
-            <div
-              className="rounded-[8px] p-3 flex items-center justify-center"
-              style={{
-                backgroundColor: "rgba(255, 255, 255, 0.92)",
-                backdropFilter: "blur(8px)",
-                boxShadow: "0 2px 12px rgba(0,0,0,0.08)",
-              }}
-            >
-              <CompanyLogo
-                logoUrl={fullLogoUrl || logoUrl}
-                companyName={companyName}
-                variant="login-hero"
-                squareIconBg={squareIconBg}
-                logoDominantColor={logoDominantColor}
-                sidebarBackground={sidebarBackground}
-              />
-            </div>
-          </div>
         </div>
       )}
     </div>

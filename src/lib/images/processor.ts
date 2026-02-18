@@ -370,7 +370,60 @@ export async function extractLogoDominantColor(
 }
 
 /**
- * Process full logo (maintain aspect ratio, min height 180px)
+ * Classify the foreground tone of a transparent squareIcon.
+ *
+ * Analyses the opaque pixels of the 32×32 icon and returns:
+ *   "dark"  – ≥70 % of opaque pixels have luminance < 80  (dark glyph)
+ *   "light" – ≥70 % of opaque pixels have luminance > 180 (white glyph)
+ *   null    – mixed / colourful, or not enough opaque pixels to judge
+ *
+ * This is used by CompanyLogo to decide whether a transparent-background
+ * icon needs a brand-tinted fill (light/mixed foreground) or a neutral
+ * fill (dark foreground that already provides its own contrast on white).
+ */
+export async function classifyLogoForeground(
+  dataUrl: string
+): Promise<"dark" | "light" | null> {
+  try {
+    const base64Match = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+    if (!base64Match) return null;
+
+    const buffer = Buffer.from(base64Match[1], "base64");
+    const { data, info } = await sharp(buffer)
+      .resize(32, 32, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const ch = info.channels; // 4 (RGBA)
+    let opaque = 0;
+    let dark = 0;
+    let light = 0;
+
+    for (let i = 0; i < data.length; i += ch) {
+      if (data[i + 3] < 128) continue; // skip transparent
+      opaque++;
+      const lum =
+        0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      if (lum < 80) dark++;
+      else if (lum > 180) light++;
+    }
+
+    // Need a minimum of opaque pixels to be meaningful
+    if (opaque < 20) return null;
+
+    if (dark / opaque >= 0.7) return "dark";
+    if (light / opaque >= 0.7) return "light";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Process full logo (maintain aspect ratio, min height 180px).
+ * Returns "" if the image is too square (≤ 1.5:1) — those are icon-shaped
+ * and should be handled by the squareIcon path instead.
  */
 export async function processFullLogo(imageUrl: string): Promise<string> {
   try {
@@ -380,6 +433,13 @@ export async function processFullLogo(imageUrl: string): Promise<string> {
     const metadata = await sharp(buffer).metadata();
     const originalWidth = metadata.width || 180;
     const originalHeight = metadata.height || 180;
+
+    // Reject square/icon-shaped images — these are not horizontal wordmarks
+    const aspectRatio = originalWidth / originalHeight;
+    if (aspectRatio < 1.5) {
+      console.log(`[processFullLogo] rejected: aspect ratio ${aspectRatio.toFixed(2)} < 1.5 (${originalWidth}×${originalHeight})`);
+      return "";
+    }
 
     // Calculate new dimensions maintaining aspect ratio
     let newHeight = Math.max(180, originalHeight);

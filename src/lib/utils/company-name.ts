@@ -8,6 +8,7 @@ const LEGALESE_PATTERNS = [
   //  ↑ Require spaces so "Hewlett-Packard" is preserved
   /\s*\|.+$/, // Remove taglines after pipe
   /\s*–.+$/, // Remove taglines after en-dash
+  /\s*—.+$/, // Remove taglines after em-dash
   /\s*:.+$/, // Remove subtitles after colon
 ];
 
@@ -49,7 +50,7 @@ const SOURCE_TRUST: Record<CompanyNameSource, number> = {
 };
 
 /** Separator pattern used to split titles into segments. */
-const SEPARATOR_RE = /\s*[|–]\s*|\s+[-]\s+|\s*:\s+/;
+const SEPARATOR_RE = /\s*[|–—]\s*|\s+[-]\s+|\s*:\s+/;
 
 /** Words that signal an SEO / marketing phrase rather than a company name. */
 const SEO_WORDS = /\b(best|top|leading|official|#1|free|cheap|affordable|premium|exclusive|ultimate|guaranteed|trusted|award[- ]?winning)\b/i;
@@ -59,6 +60,12 @@ const VERB_START = /^(get|buy|find|discover|try|start|join|learn|build|create|ma
 
 /** Single common words that are never a company name (nav labels, generic terms). */
 const GENERIC_SINGLE_WORDS = /^(work|works|home|about|contact|blog|news|portfolio|projects|services|products|pricing|team|shop|store|help|support|menu|gallery|events|reviews|clients|digital|creative|studio|agency|design|global|solutions|consulting|group|media|online|web)$/i;
+
+/** Multi-word generic phrases that are never a company name (page titles, nav labels). */
+const GENERIC_PHRASES = /^(home\s*page|about\s+us|contact\s+us|our\s+(services|team|work|story|mission|vision|products|clients|portfolio)|welcome\s+(home|back|to)|main\s+page|landing\s+page|front\s+page|my\s+(account|dashboard|profile)|sign\s+in|log\s+in|get\s+(started|in\s+touch))$/i;
+
+/** Location-prefixed descriptors: "City, ST ..." — SEO geo-qualifier, not a company name. */
+const GEO_PREFIX = /^[A-Z][a-zA-Z\s]+,\s*[A-Z]{2}\b/;
 
 export interface ScoredCandidate {
   value: string;
@@ -148,6 +155,19 @@ export function selectCompanyName(
     if (GENERIC_SINGLE_WORDS.test(val.trim())) {
       score -= 30;
       reasons.push("generic-word: -30");
+    }
+
+    // Multi-word generic phrase → same penalty
+    if (GENERIC_PHRASES.test(val.trim())) {
+      score -= 30;
+      reasons.push("generic-phrase: -30");
+    }
+
+    // Location-prefixed descriptor ("Spartanburg, SC Virtual Accounting Firm")
+    // → SEO geo-qualifier, not a company name
+    if (GEO_PREFIX.test(val.trim())) {
+      score -= 20;
+      reasons.push("geo-prefix: -20");
     }
 
     // More than 4 words → likely a phrase, not a name

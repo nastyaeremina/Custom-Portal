@@ -22,7 +22,7 @@ export function MessagesView({
   theme,
   welcomeMessageText,
 }: MessagesViewProps) {
-  const { companyName, logoUrl, squareIconBg, logoDominantColor } = branding;
+  const { companyName, logoUrl, squareIconBg, logoDominantColor, squareIconFg } = branding;
 
   return (
     <div
@@ -48,7 +48,7 @@ export function MessagesView({
           {/* ── Message 1: Company ── */}
           <div className="flex gap-2.5">
             {/* Avatar: company logo — circular, same size as user avatar */}
-            <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="messages" squareIconBg={squareIconBg} accentColor={theme.accent} logoDominantColor={logoDominantColor} sidebarBackground={theme.sidebarBackground} />
+            <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="messages" squareIconBg={squareIconBg} logoDominantColor={logoDominantColor} squareIconFg={squareIconFg} accentColor={theme.accent} sidebarBackground={theme.sidebarBackground} />
 
             {/* Message content */}
             <div className="flex-1 min-w-0">

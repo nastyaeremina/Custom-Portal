@@ -48,6 +48,14 @@ export interface PreviewBranding {
   logoDominantColor: string | null;
 
   /**
+   * Foreground tone of the square icon: "dark" (dark glyph), "light" (white glyph),
+   * or null (mixed/colourful/unknown).
+   * Used by CompanyLogo to decide container fill — dark glyphs on transparent bg
+   * get a neutral fill instead of brand tint, since they provide their own contrast.
+   */
+  squareIconFg: "dark" | "light" | null;
+
+  /**
    * Full horizontal logo URL (min 180 px height).
    * Currently unused in the 3 preview screens but kept for future
    * screens (e.g. email header, social card).
@@ -160,7 +168,8 @@ export function toPreviewPayload(
       logoUrl,
       squareIconBg: data.images.squareIconBg ?? null,
       logoDominantColor: data.images.logoDominantColor ?? null,
-      fullLogoUrl: data.images.fullLogo || data.images.rawLogoUrl || null,
+      squareIconFg: data.images.squareIconFg ?? null,
+      fullLogoUrl: data.images.fullLogo || null,
     },
     theme: {
       sidebarBackground: data.colors.sidebarBackground,

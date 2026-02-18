@@ -927,23 +927,29 @@ export async function evaluateScrapedHeroes(
     return areaB - areaA;
   });
 
-  // 5. Try top N candidates through the same quality gate.
-  //    Collect all passing results so we can prefer photo-like over text-heavy.
+  // 5. Evaluate top N candidates in parallel through the quality gate.
   const candidates = sorted.slice(0, maxTries);
 
+  for (let i = 0; i < candidates.length; i++) {
+    console.log(
+      `[scraped-hero] queuing candidate ${i + 1}/${candidates.length}: ` +
+        `${candidates[i].width}×${candidates[i].height} ${candidates[i].url.substring(0, 100)}`
+    );
+  }
+
+  const results = await Promise.allSettled(
+    candidates.map(c => evaluateOgHero(c.url))
+  );
+
+  // Find the first hero-fit candidate (preserving priority order by pixel area)
   let bestFailedScore: OgHeroScore | null = null;
   let bestFailedUrl: string | null = null;
 
-  // Best hero-fit candidate
-  let bestFit: { result: OgHeroEvaluation; triedIndex: number } | null = null;
+  for (let i = 0; i < results.length; i++) {
+    const settled = results[i];
+    if (settled.status !== "fulfilled") continue;
+    const result = settled.value;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i];
-    console.log(
-      `[scraped-hero] trying candidate ${i + 1}/${candidates.length}: ` +
-        `${candidate.width}×${candidate.height} ${candidate.url.substring(0, 100)}`
-    );
-    const result = await evaluateOgHero(candidate.url);
     if (result.score) {
       console.log(
         `[scraped-hero] candidate ${i + 1} → ${result.passed ? "PASS" : "FAIL"} ` +
@@ -959,26 +965,18 @@ export async function evaluateScrapedHeroes(
       );
 
       if (fit) {
-        // Found a hero-fit winner — use immediately
-        bestFit = { result, triedIndex: i };
-        break;
+        return {
+          ...result,
+          candidatesConsidered: prefiltered.length,
+          candidatesTried: i + 1,
+        };
       }
-      // Not hero-fit — don't use (no text-heavy fallback anymore)
     } else {
-      // Track the best-scoring failure for debug output
       if (result.score && (!bestFailedScore || result.score.total > bestFailedScore.total)) {
         bestFailedScore = result.score;
-        bestFailedUrl = candidate.url;
+        bestFailedUrl = candidates[i].url;
       }
     }
-  }
-
-  if (bestFit) {
-    return {
-      ...bestFit.result,
-      candidatesConsidered: prefiltered.length,
-      candidatesTried: bestFit.triedIndex + 1,
-    };
   }
 
   // None passed hero fitness — return the best failed score for debug visibility

@@ -20,6 +20,9 @@ export interface PortalImages {
   /** Dominant foreground (logo) colour of the squareIcon (hex, e.g. "#2055a4").
    *  Used to contrast-check proposed avatar backgrounds and avoid blue-on-blue etc. */
   logoDominantColor: string | null;
+  /** Foreground tone of the squareIcon: "dark" (dark glyph), "light" (white glyph), or null (mixed/unknown).
+   *  Used to decide container fill: dark glyphs on transparent bg get neutral fill, not brand tint. */
+  squareIconFg: "dark" | "light" | null;
   fullLogo: string | null;
   loginImage: string | null;
   loginImageOrientation: "landscape" | "portrait" | "square" | null;
@@ -197,6 +200,17 @@ export interface RawOutputs {
     score: number;
     threshold: number;
     signals: string[];
+  };
+  /** Avatar container background debug info */
+  avatarContainerDebug?: {
+    /** "light-solid" = baked-in white bg, "dark-solid" = coloured bg, "transparent" = no solid bg */
+    logoBackgroundDetected: "light-solid" | "dark-solid" | "transparent";
+    /** The colour (or strategy) chosen for sidebar/messages container bg */
+    containerBgChosen: string;
+    /** logoDominantColor extracted from the squareIcon */
+    primaryColorExtracted: string | null;
+    /** "dark" = dark glyph, "light" = white glyph, null = mixed/colourful */
+    foregroundTone: "dark" | "light" | null;
   };
 }
 

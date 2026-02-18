@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { GenerateRequestSchema, PortalData, RawOutputs, DalleGeneration } from "@/types/api";
-import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
+import { scrapeWebsite } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
 import { selectCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
@@ -8,6 +8,7 @@ import { generateValidatedColorScheme, selectAccentColorWithContext, selectSideb
 import {
   extractSquareIconBg,
   extractLogoDominantColor,
+  classifyLogoForeground,
   processFullLogo,
   processLoginImage,
   processSocialImage,
@@ -377,6 +378,7 @@ export async function POST(request: NextRequest) {
               squareIcon: null,
               squareIconBg: null,
               logoDominantColor: null,
+              squareIconFg: null,
               fullLogo: null,
               loginImage,
               loginImageOrientation,
@@ -443,13 +445,38 @@ export async function POST(request: NextRequest) {
         let squareIcon: string | null = null;
         let squareIconBg: string | null = null;
         let logoDominantColor: string | null = null;
+        let squareIconFg: "dark" | "light" | null = null;
         let fullLogo: string | null = null;
         let socialImage: string | null = null;
         let dalleImageUrl: string | null = null;
         let dalleGenerations: DalleGeneration[] = initialDalleGenerations;
 
-        // ── Brand mark selection: evaluate favicon + logo + manifest icons ──
+        // ── Brand mark + full logo in parallel ──
+        // These are independent: brand mark evaluates favicon/manifest/logo as icon,
+        // while full logo processes the horizontal wordmark. Run concurrently.
+        const fullLogoPromise = scrapedData.logo
+          ? processFullLogo(scrapedData.logo).catch((error) => {
+              console.error("Error processing full logo:", error);
+              return null;
+            })
+          : Promise.resolve(null);
+
+        // Helper: perceived brightness > 220 → "light".
+        // Mirrors `isLightColor` in CompanyLogo.tsx.
+        const _isLight = (c: string | null) => {
+          if (!c) return true;
+          const h = c.replace("#", "");
+          if (h.length < 6) return true;
+          const r = parseInt(h.substring(0, 2), 16);
+          const g = parseInt(h.substring(2, 4), 16);
+          const b = parseInt(h.substring(4, 6), 16);
+          return (r * 299 + g * 587 + b * 114) / 1000 > 220;
+        };
+
         let brandMarkSelection;
+        // Avatar / container-bg debug — hoisted so rawOutputs can reference them.
+        let logoBgType: "light-solid" | "dark-solid" | "transparent" = "transparent";
+        let containerBgChosen = "brandFill (default)";
         try {
           brandMarkSelection = await selectBestBrandMark(
             scrapedData.favicon,
@@ -466,14 +493,36 @@ export async function POST(request: NextRequest) {
           if (brandMarkSelection.selected) {
             squareIcon = await processBrandMark(brandMarkSelection.selected);
             if (squareIcon) {
-              [squareIconBg, logoDominantColor] = await Promise.all([
+              [squareIconBg, logoDominantColor, squareIconFg] = await Promise.all([
                 extractSquareIconBg(squareIcon),
                 extractLogoDominantColor(squareIcon),
+                classifyLogoForeground(squareIcon),
               ]);
+              // Classify logo background for debug output.
+              // Mirrors the detection logic in CompanyLogo.tsx so the
+              // server log reveals exactly what the client will decide.
+              logoBgType =
+                squareIconBg == null ? "transparent"
+                : _isLight(squareIconBg) ? "light-solid"
+                : "dark-solid";
+              // For sidebar/messages the containerBg will be:
+              //   light-solid → squareIconBg (match the baked-in white bg)
+              //   dark-solid  → squareIconBg
+              //   transparent + dark glyph → near-white (dark icon provides own contrast)
+              //   transparent + light/mixed → brandFill (tinted pastel from dominant/accent)
+              containerBgChosen =
+                logoBgType !== "transparent"
+                  ? squareIconBg!
+                  : squareIconFg === "dark"
+                    ? "near-white (dark glyph)"
+                    : `brandFill (from ${!_isLight(logoDominantColor) ? "logoDominantColor" : !_isLight(colors.accent) ? "accent" : "near-white"})`;
               console.log(
                 `[avatar-debug] ${domain} → squareIconBg: ${squareIconBg ?? "null"}, ` +
                 `logoDominantColor: ${logoDominantColor ?? "null"}, ` +
-                `accent: ${colors.accent}`
+                `squareIconFg: ${squareIconFg ?? "null"}, ` +
+                `accent: ${colors.accent}, ` +
+                `logoBackgroundDetected: ${logoBgType}, ` +
+                `containerBgChosen: ${containerBgChosen}`
               );
             }
           }
@@ -482,14 +531,8 @@ export async function POST(request: NextRequest) {
           brandMarkSelection = null;
         }
 
-        // Process full logo (still used for future screens / fullLogoUrl)
-        if (scrapedData.logo) {
-          try {
-            fullLogo = await processFullLogo(scrapedData.logo);
-          } catch (error) {
-            console.error("Error processing full logo:", error);
-          }
-        }
+        // Await full logo (started in parallel above)
+        fullLogo = (await fullLogoPromise) || null;
 
         // Send images event (brand mark + logo processed)
         controller.enqueue(encoder.encode(createSSEMessage({
@@ -502,6 +545,7 @@ export async function POST(request: NextRequest) {
               squareIcon,
               squareIconBg,
               logoDominantColor,
+              squareIconFg,
               fullLogo,
               loginImage,
               loginImageOrientation,
@@ -538,6 +582,7 @@ export async function POST(request: NextRequest) {
                 squareIcon,
                 squareIconBg,
                 logoDominantColor,
+                squareIconFg,
                 fullLogo,
                 loginImage,
                 loginImageOrientation,
@@ -628,6 +673,7 @@ export async function POST(request: NextRequest) {
             squareIcon,
             squareIconBg,
             logoDominantColor,
+            squareIconFg,
             fullLogo,
             loginImage,
             loginImageOrientation,
@@ -706,6 +752,12 @@ export async function POST(request: NextRequest) {
                 log: brandMarkSelection.log,
               }
             : undefined,
+          avatarContainerDebug: {
+            logoBackgroundDetected: logoBgType,
+            containerBgChosen,
+            primaryColorExtracted: logoDominantColor ?? null,
+            foregroundTone: squareIconFg,
+          },
           ogHeroEvaluation: {
             ogImageUrl: ogHeroResult.ogImageUrl,
             passed: ogHeroResult.passed,
@@ -745,11 +797,8 @@ export async function POST(request: NextRequest) {
           error: errorMessage,
         })));
       } finally {
-        try {
-          await closeBrowser();
-        } catch {
-          // Ignore cleanup errors
-        }
+        // Browser singleton stays alive for subsequent requests (page is
+        // already closed by scrapeWebsite). Only close the SSE stream.
         controller.close();
       }
     },

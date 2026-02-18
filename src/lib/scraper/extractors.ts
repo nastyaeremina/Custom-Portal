@@ -1225,8 +1225,7 @@ export async function extractCompanyNameCandidates(
  */
 const HOSTING_PROVIDERS = [
   "websupport", "godaddy", "namecheap", "bluehost", "hostgator",
-  "siteground", "dreamhost", "ionos", "hostinger", "wix",
-  "squarespace", "wordpress.com", "weebly",
+  "siteground", "dreamhost", "ionos", "hostinger",
   "plesk", "cpanel", "directadmin", "cloudflare",
   "sedoparking", "hugedomains", "dan.com", "afternic",
   "1and1", "register.com", "name.com", "hover",
@@ -1235,6 +1234,19 @@ const HOSTING_PROVIDERS = [
   "ovh", "hetzner", "contabo", "linode",
   "parking", "parked",
 ];
+
+/**
+ * Website-builder platforms (Squarespace, Wix, Weebly, WordPress.com).
+ * Real businesses routinely host on these, so their presence in page
+ * text is a much weaker parking signal than a registrar / control-panel
+ * name.  They only contribute WEBSITE_BUILDER_SCORE (15) instead of the
+ * full HOSTING_PROVIDER_SCORE (40), which prevents false-positives on
+ * legitimate Squarespace/Wix sites.
+ */
+const WEBSITE_BUILDERS = [
+  "squarespace", "wix", "weebly", "wordpress.com",
+];
+const WEBSITE_BUILDER_SCORE = 15;
 
 /**
  * Regex patterns that strongly indicate a parked / placeholder page.
@@ -1350,8 +1362,9 @@ export async function detectParkedDomain(
     .join(" ")
     .toLowerCase();
 
-  // ── Signal A: Known hosting provider in page text ──
+  // ── Signal A: Known hosting provider / website builder in page text ──
   const matchedProviders: string[] = [];
+  const matchedBuilders: string[] = [];
   for (const provider of HOSTING_PROVIDERS) {
     if (allText.includes(provider)) {
       // Check that the domain itself does NOT contain the provider name
@@ -1361,9 +1374,21 @@ export async function detectParkedDomain(
       }
     }
   }
+  for (const builder of WEBSITE_BUILDERS) {
+    if (allText.includes(builder)) {
+      if (!domainStem.includes(builder.replace(/\./g, ""))) {
+        matchedBuilders.push(builder);
+      }
+    }
+  }
   if (matchedProviders.length > 0) {
     score += HOSTING_PROVIDER_SCORE;
     signals.push(`hosting-provider: ${matchedProviders.join(", ")}`);
+  }
+  if (matchedBuilders.length > 0 && matchedProviders.length === 0) {
+    // Only add builder score when there's no stronger hosting-provider signal
+    score += WEBSITE_BUILDER_SCORE;
+    signals.push(`website-builder: ${matchedBuilders.join(", ")}`);
   }
 
   // ── Signal B: Parked keyword phrases ──
@@ -1389,6 +1414,9 @@ export async function detectParkedDomain(
   // ── Signal D: Domain-name mismatch with hosting provider ──
   // The page title or og:site_name is a known provider AND has zero
   // overlap with the domain stem.
+  // NOTE: Only checks HOSTING_PROVIDERS, not WEBSITE_BUILDERS.
+  // Website builders (Squarespace, Wix, etc.) commonly appear in
+  // og:site_name for legitimate business sites.
   if (domainStem.length >= 3) {
     const titleLower = pageData.title.toLowerCase();
     const ogNameLower = pageData.ogSiteName.toLowerCase();

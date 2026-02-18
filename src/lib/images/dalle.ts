@@ -636,6 +636,38 @@ interface NormalizedStops {
  * - Sort by luminance (lighter → darker for top-to-bottom feel)
  * - Fall back to preset if colors are unusable
  */
+/**
+ * Create a clean single-color pastel fill from a base color.
+ * Lightens to ~85% luminance and desaturates slightly for a premium feel.
+ */
+function makePastelFill(hex: string): string {
+  const { r, g, b } = hexToRgb(hex);
+  const hsl = rgbToHsl(r, g, b);
+  // Target: soft pastel at ~85% lightness, moderate saturation
+  const pastelL = 0.85;
+  const pastelS = Math.min(hsl.s, 0.45);
+  const pastel = hslToRgb(hsl.h, pastelS, pastelL);
+  return rgbToHex(pastel.r, pastel.g, pastel.b);
+}
+
+/**
+ * Detect if input colors are "low-color" — muted, near-gray, or all
+ * clustering around the same hue. These produce muddy multi-stop gradients
+ * and should use a single dominant color pastel fill instead.
+ */
+function isLowColorPalette(colors: string[]): boolean {
+  if (colors.length === 0) return true;
+  // Check average saturation — if most colors are desaturated, it's low-color
+  let totalSat = 0;
+  for (const c of colors) {
+    const { r, g, b } = hexToRgb(c);
+    const hsl = rgbToHsl(r, g, b);
+    totalSat += hsl.s;
+  }
+  const avgSat = totalSat / colors.length;
+  return avgSat < 0.25;
+}
+
 function normalizeStops(
   inputColors: string[],
   domainHash: number
@@ -661,6 +693,28 @@ function normalizeStops(
   // Step 3: Deduplicate similar colors
   const deduped = deduplicateColors(clamped);
 
+  // Step 3.5: Low-color palette detection — for minimal brands like Assembly,
+  // prefer a clean single-color pastel fill over muddy multi-stop blends.
+  if (isLowColorPalette(cleaned)) {
+    // Pick the most saturated input color as the base hue
+    let bestColor = cleaned[0];
+    let bestSat = 0;
+    for (const c of cleaned) {
+      const { r, g, b } = hexToRgb(c);
+      const hsl = rgbToHsl(r, g, b);
+      if (hsl.s > bestSat) {
+        bestSat = hsl.s;
+        bestColor = c;
+      }
+    }
+    const pastel = makePastelFill(bestColor);
+    return {
+      stops: [pastel, pastel],
+      usedPreset: false,
+      reason: `low-color palette (avg sat < 0.25), single pastel fill from ${bestColor}`,
+    };
+  }
+
   if (deduped.length < 2) {
     // Only one unique color after dedup — check if it's usable
     const lum = luminance(deduped[0]);
@@ -674,15 +728,12 @@ function normalizeStops(
         reason: `single color after dedup (${deduped[0]}) is too ${lum < 0.15 ? "dark" : "light"}`,
       };
     }
-    // Make a 2-stop gradient from the single color: lighter version → original
-    const { r, g, b } = hexToRgb(deduped[0]);
-    const hsl = rgbToHsl(r, g, b);
-    const lighterL = Math.min(0.90, hsl.l + 0.25);
-    const lighter = hslToRgb(hsl.h, hsl.s * 0.6, lighterL);
+    // Single usable color → clean pastel fill (not a gradient blend)
+    const pastel = makePastelFill(deduped[0]);
     return {
-      stops: [rgbToHex(lighter.r, lighter.g, lighter.b), deduped[0]],
+      stops: [pastel, pastel],
       usedPreset: false,
-      reason: "single color expanded to lighter→darker",
+      reason: "single color → pastel fill",
     };
   }
 
@@ -690,16 +741,45 @@ function normalizeStops(
   const final = deduped.slice(0, 4);
   final.sort((a, b) => luminance(b) - luminance(a));
 
-  // Step 5: Check spread — if all colors are too close in luminance, use preset
+  // Step 5: Check spread — if all colors are too close in luminance,
+  // use pastel fill from the most saturated color instead of a preset
   const lumRange = luminance(final[0]) - luminance(final[final.length - 1]);
-  if (lumRange < 0.08) {
-    const preset = GRADIENT_PRESETS[domainHash % GRADIENT_PRESETS.length];
+  if (lumRange < 0.15) {
+    // Find most saturated color for the pastel base
+    let bestColor = final[0];
+    let bestSat = 0;
+    for (const c of final) {
+      const { r, g, b } = hexToRgb(c);
+      const hsl = rgbToHsl(r, g, b);
+      if (hsl.s > bestSat) {
+        bestSat = hsl.s;
+        bestColor = c;
+      }
+    }
+    const pastel = makePastelFill(bestColor);
     return {
-      stops: preset.stops,
-      usedPreset: true,
-      presetName: preset.name,
-      reason: `luminance range too narrow (${lumRange.toFixed(3)}), colors too similar`,
+      stops: [pastel, pastel],
+      usedPreset: false,
+      reason: `narrow lum range (${lumRange.toFixed(3)}), pastel fill from ${bestColor}`,
     };
+  }
+
+  // Step 6: Anti-muddy guard — when few stops (2-3) span a wide luminance
+  // range, the dark end creates a muddy blend (e.g. light-blue → dark-teal).
+  // Use the lightest stop as a clean pastel fill instead.
+  if (final.length <= 3) {
+    const darkest = final[final.length - 1];
+    const darkLum = luminance(darkest);
+    // If the darkest stop is very dark (< 0.35), the gradient will look muddy
+    if (darkLum < 0.35) {
+      const lightest = final[0];
+      const pastel = makePastelFill(lightest);
+      return {
+        stops: [pastel, pastel],
+        usedPreset: false,
+        reason: `anti-muddy: darkest stop ${darkest} (lum ${darkLum.toFixed(2)}) would muddy blend, pastel from ${lightest}`,
+      };
+    }
   }
 
   return {
@@ -804,23 +884,26 @@ async function generateGradientImage(
 export async function extractColorsFromScrapedImages(
   scrapedImages: ScrapedImageInfo[]
 ): Promise<string[]> {
-  const allColors: Map<string, number> = new Map();
   const imagesToProcess = scrapedImages.slice(0, 5);
 
-  for (const img of imagesToProcess) {
-    try {
+  // Download and extract colors from all images in parallel
+  const results = await Promise.allSettled(
+    imagesToProcess.map(async (img) => {
       const buffer = await fetchImageBuffer(img.url);
-      if (!buffer) continue;
+      if (!buffer) return [];
+      return extractColorsWithDetails(buffer);
+    })
+  );
 
-      const colors = await extractColorsWithDetails(buffer);
-
-      colors.slice(0, 3).forEach((c, idx) => {
-        const weight = 3 - idx;
-        allColors.set(c.color, (allColors.get(c.color) || 0) + weight);
-      });
-    } catch (error) {
-      console.error(`Error extracting colors from ${img.url}:`, error);
-    }
+  // Aggregate colors from all settled results
+  const allColors: Map<string, number> = new Map();
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    const colors = result.value;
+    colors.slice(0, 3).forEach((c, idx) => {
+      const weight = 3 - idx;
+      allColors.set(c.color, (allColors.get(c.color) || 0) + weight);
+    });
   }
 
   const sorted = Array.from(allColors.entries())

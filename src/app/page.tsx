@@ -15,8 +15,9 @@ import { toPreviewPayload } from "@/types/preview";
 const STATIC_BRANDING: PreviewBranding = {
   companyName: "Assembly",
   logoUrl: "/assets/icons/Brandmages logo (small inverse).svg",
-  squareIconBg: null,
+  squareIconBg: "#1E293B",
   logoDominantColor: null,
+  squareIconFg: null,
   fullLogoUrl: null,
 };
 
@@ -151,6 +152,7 @@ export default function Home() {
                     squareIcon: event.data?.images?.squareIcon ?? prev?.images?.squareIcon ?? null,
                     squareIconBg: event.data?.images?.squareIconBg ?? prev?.images?.squareIconBg ?? null,
                     logoDominantColor: event.data?.images?.logoDominantColor ?? prev?.images?.logoDominantColor ?? null,
+                    squareIconFg: event.data?.images?.squareIconFg ?? prev?.images?.squareIconFg ?? null,
                     fullLogo: event.data?.images?.fullLogo ?? prev?.images?.fullLogo ?? null,
                     loginImage: event.data?.images?.loginImage ?? prev?.images?.loginImage ?? null,
                     loginImageOrientation: event.data?.images?.loginImageOrientation ?? prev?.images?.loginImageOrientation ?? null,

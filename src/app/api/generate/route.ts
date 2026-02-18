@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GenerateRequestSchema, GenerateResponse, PortalData, RawOutputs } from "@/types/api";
-import { scrapeWebsite, closeBrowser } from "@/lib/scraper";
+import { scrapeWebsite } from "@/lib/scraper";
 import { parseInput } from "@/lib/utils/url";
 import { selectCompanyName } from "@/lib/utils/company-name";
 import { extractColorsFromUrl } from "@/lib/colors/extractor";
@@ -9,6 +9,7 @@ import {
   processSquareIcon,
   extractSquareIconBg,
   extractLogoDominantColor,
+  classifyLogoForeground,
   processFullLogo,
   processLoginImage,
   processSocialImage,
@@ -143,6 +144,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     let squareIcon: string | null = null;
     let squareIconBg: string | null = null;
     let logoDominantColor: string | null = null;
+    let squareIconFg: "dark" | "light" | null = null;
     let fullLogo: string | null = null;
     let socialImage: string | null = null;
     let dalleImageUrl: string | null = null;
@@ -178,9 +180,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       try {
         squareIcon = await processSquareIcon(scrapedData.favicon);
         if (squareIcon) {
-          [squareIconBg, logoDominantColor] = await Promise.all([
+          [squareIconBg, logoDominantColor, squareIconFg] = await Promise.all([
             extractSquareIconBg(squareIcon),
             extractLogoDominantColor(squareIcon),
+            classifyLogoForeground(squareIcon),
           ]);
         }
       } catch (error) {
@@ -191,7 +194,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
     // Process full logo
     if (scrapedData.logo) {
       try {
-        fullLogo = await processFullLogo(scrapedData.logo);
+        fullLogo = (await processFullLogo(scrapedData.logo)) || null;
       } catch (error) {
         console.error("Error processing full logo:", error);
       }
@@ -205,9 +208,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       try {
         squareIcon = await processSquareIcon(scrapedData.logo);
         if (squareIcon) {
-          [squareIconBg, logoDominantColor] = await Promise.all([
+          [squareIconBg, logoDominantColor, squareIconFg] = await Promise.all([
             extractSquareIconBg(squareIcon),
             extractLogoDominantColor(squareIcon),
+            classifyLogoForeground(squareIcon),
           ]);
         }
       } catch (error) {
@@ -301,6 +305,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
         squareIcon,
         squareIconBg,
         logoDominantColor,
+        squareIconFg,
         fullLogo,
         loginImage,
         loginImageOrientation,
@@ -401,11 +406,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<GenerateR
       { status: 500 }
     );
   } finally {
-    // Clean up browser
-    try {
-      await closeBrowser();
-    } catch {
-      // Ignore cleanup errors
-    }
+    // Browser singleton stays alive for subsequent requests (page is
+    // already closed by scrapeWebsite).
   }
 }

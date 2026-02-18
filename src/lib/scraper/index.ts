@@ -19,25 +19,32 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
   const page = await createPage(browser, url);
 
   try {
+    // Helper: catch + log so extractor failures are never silent.
+    const safe = <T>(label: string, promise: Promise<T>, fallback: T): Promise<T> =>
+      promise.catch((err) => {
+        console.error(`[scraper] ${label} failed:`, err?.message ?? err);
+        return fallback;
+      });
+
     // Run extractions in parallel where possible
     const [favicon, logo, ogImage, manifestData, heroImages, colorsWithUsage, linkButtonColors, navHeaderBackground, metadata, domNameCandidates, parkedResult] = await Promise.all([
-      extractFavicon(page).catch(() => null),
-      extractLogo(page).catch(() => null),
-      extractOgImage(page).catch(() => null),
-      extractManifestData(page).catch(() => ({ icons: [] as string[], name: null, shortName: null })),
-      extractHeroImages(page).catch(() => []),
-      extractColorsWithUsage(page).catch(() => []),
-      extractLinkButtonColors(page).catch(() => []),
-      extractNavHeaderBackground(page).catch(() => null),
-      extractMetadata(page).catch(() => ({
+      safe("extractFavicon", extractFavicon(page), null),
+      safe("extractLogo", extractLogo(page), null),
+      safe("extractOgImage", extractOgImage(page), null),
+      safe("extractManifestData", extractManifestData(page), { icons: [] as string[], name: null, shortName: null }),
+      safe("extractHeroImages", extractHeroImages(page), []),
+      safe("extractColorsWithUsage", extractColorsWithUsage(page), []),
+      safe("extractLinkButtonColors", extractLinkButtonColors(page), []),
+      safe("extractNavHeaderBackground", extractNavHeaderBackground(page), null),
+      safe("extractMetadata", extractMetadata(page), {
         title: null,
         description: null,
         meta: {},
-      })),
-      extractCompanyNameCandidates(page).catch(() => []),
-      detectParkedDomain(page, url).catch(() => ({
+      }),
+      safe("extractCompanyNameCandidates", extractCompanyNameCandidates(page), []),
+      safe("detectParkedDomain", detectParkedDomain(page, url), {
         isParked: false, score: 0, threshold: 50, signals: [] as string[],
-      })),
+      }),
     ]);
 
     // ── Merge manifest name/shortName into company-name candidates ──

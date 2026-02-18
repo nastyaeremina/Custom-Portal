@@ -78,6 +78,17 @@ async function setupPage(browser: Browser, ua: string): Promise<Page> {
   await page.setViewport({ width: 1920, height: 1080 });
   await page.setUserAgent(ua);
 
+  // Polyfill the esbuild `__name` helper that may leak into page.evaluate()
+  // callbacks.  esbuild injects `__name(fn, "name")` for function-name
+  // preservation, but that symbol doesn't exist in the browser context.
+  // Defining it as a no-op identity function prevents ReferenceError.
+  // IMPORTANT: must use a raw string, NOT a function callback — otherwise
+  // esbuild transforms the callback itself and injects __name into it,
+  // creating the same error we're trying to fix.
+  await page.evaluateOnNewDocument(
+    `if (typeof globalThis.__name === "undefined") { globalThis.__name = function(fn) { return fn; }; }`
+  );
+
   // Block unnecessary resources to speed up loading
   await page.setRequestInterception(true);
   page.on("request", (req) => {

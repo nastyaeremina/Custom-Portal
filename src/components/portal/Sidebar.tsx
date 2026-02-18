@@ -169,7 +169,7 @@ export function Sidebar({
     >
       {/* Logo / Company name */}
       <div className="flex items-center gap-2 mb-5 px-1.5">
-        <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="sidebar" squareIconBg={branding.squareIconBg} sidebarBackground={sidebarBackground} />
+        <CompanyLogo logoUrl={logoUrl} companyName={companyName} variant="sidebar" squareIconBg={branding.squareIconBg} logoDominantColor={branding.logoDominantColor} squareIconFg={branding.squareIconFg} accentColor={theme.accent} sidebarBackground={sidebarBackground} />
         <span className="font-medium text-[11px] truncate">{companyName}</span>
       </div>
 
