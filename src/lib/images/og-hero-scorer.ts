@@ -884,19 +884,25 @@ export interface ScrapedHeroEvaluation extends OgHeroEvaluation {
 export async function evaluateScrapedHeroes(
   images: Array<{ url: string; width?: number; height?: number; type: string }>,
   ogUrl: string | null,
-  maxTries = 3
+  maxTries = 5
 ): Promise<ScrapedHeroEvaluation> {
   // 1. Filter to hero type only
   const heroes = images.filter((img) => img.type === "hero");
 
   // 2. Deduplicate URLs, exclude the OG image, and skip data: URIs (placeholders)
+  //    Dedup by base URL (strip query params) so the same CDN image with different
+  //    resize params (e.g. Shopify ?originalWidth=...&width=...) isn't tried twice.
   const seen = new Set<string>();
-  if (ogUrl) seen.add(ogUrl);
+  const baseUrlOf = (url: string) => {
+    try { return new URL(url).origin + new URL(url).pathname; } catch { return url; }
+  };
+  if (ogUrl) seen.add(baseUrlOf(ogUrl));
 
   const unique = heroes.filter((img) => {
     if (img.url.startsWith("data:")) return false;
-    if (seen.has(img.url)) return false;
-    seen.add(img.url);
+    const key = baseUrlOf(img.url);
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 
