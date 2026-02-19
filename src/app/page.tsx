@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { UrlInputForm } from "@/components/features/UrlInputForm";
 import { PortalPreview } from "@/components/portal/PortalPreview";
 import { LoginView } from "@/components/portal/LoginView";
@@ -59,12 +59,18 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
 
   /* ─── Fluid scaling for desktop static hero card ─── */
-  const desktopCardRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(STATIC_CARD_MAX_W);
 
-  useEffect(() => {
-    const el = desktopCardRef.current;
-    if (!el) return;
+  // Callback ref: re-attaches the ResizeObserver every time the static card
+  // mounts (including after an error remount), and cleans up when it unmounts.
+  const roRef = useRef<ResizeObserver | null>(null);
+  const desktopCardRef = useCallback((node: HTMLDivElement | null) => {
+    // Disconnect previous observer
+    if (roRef.current) {
+      roRef.current.disconnect();
+      roRef.current = null;
+    }
+    if (!node) return;
 
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -72,9 +78,8 @@ export default function Home() {
         setContainerW(w);
       }
     });
-
-    ro.observe(el);
-    return () => ro.disconnect();
+    ro.observe(node);
+    roRef.current = ro;
   }, []);
 
   /* Scale based on width, but cap so height never exceeds STATIC_CARD_MAX_H */
