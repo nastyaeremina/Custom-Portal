@@ -198,6 +198,10 @@ export default function Home() {
                 setStatusMessage(null);
               }
             } catch (parseError) {
+              // Re-throw API errors so they reach the outer catch → setError()
+              if (parseError instanceof Error && !parseError.message.includes("JSON")) {
+                throw parseError;
+              }
               console.error("Failed to parse SSE event:", parseError);
             }
           }
