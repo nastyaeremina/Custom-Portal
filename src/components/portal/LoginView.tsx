@@ -57,9 +57,11 @@ export function LoginView({
   const lowConfidence = companyName === "Company";
   const hasHeroPhoto = !!loginHeroImageUrl;
   // Gradient + logo overlay — need gradient, any logo, and confident brand
-  const hasGradientWithLogo = !hasHeroPhoto && !!loginGradientImage && !!heroLogoUrl && !lowConfidence;
-  // When only squareIcon (no fullLogo), use squareIconBg as solid bg instead of gradient
-  const useSquareIconHero = hasGradientWithLogo && !fullLogoUrl;
+  // Tier 2 requires a fullLogo (horizontal wordmark) — a tiny squareIcon blown up
+  // to hero size looks blurry/pixelated, so we only allow Tier 2 when fullLogoUrl exists.
+  const hasGradientWithLogo = !hasHeroPhoto && !!loginGradientImage && !!fullLogoUrl && !lowConfidence;
+  // useSquareIconHero is no longer needed — Tier 2 always has fullLogoUrl now
+  const useSquareIconHero = false;
   // Generic stock photo fallback — when no hero photo and no gradient+logo combo
   const hasGenericFallback = !hasHeroPhoto && !hasGradientWithLogo;
   const genericHeroUrl = hasGenericFallback ? pickGenericHero(companyName) : null;
