@@ -109,6 +109,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
   const autoplayActive = useRef(false);
   const autoplayResumeAt = useRef(0); // timestamp when autoplay resumed (for ease-in)
   const prefersReducedMotion = useRef(false);
+  const snapTarget = useRef<number | null>(null); // explicit target card for dot-click navigation
 
   /* ─── Responsive card scaling ─── */
   const vw = useViewportWidth();
@@ -182,19 +183,40 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       const reduced = prefersReducedMotion.current;
 
       if (!isDragging.current) {
-        if (autoplayActive.current && !isPaused.current && !reduced) {
+        if (snapTarget.current !== null) {
+          // Dot-click: spring-drive to exact target (skip momentum branch)
+          const target = snapTarget.current;
+          const delta = shortestDelta(pos.current, target, N);
+
+          if (reduced) {
+            pos.current = wrap(target, N);
+            vel.current = 0;
+            snapTarget.current = null;
+          } else if (Math.abs(delta) > SNAP_POS_EPS || Math.abs(vel.current) > SNAP_VEL_EPS) {
+            // Stiffer spring for dot-click traversals (1-2 cards)
+            const k = SNAP_K * 2.5;
+            const c = SNAP_C * 1.5;
+            const accel = delta * k - vel.current * c;
+            vel.current += accel * dtMs;
+            pos.current += vel.current * dt;
+          } else {
+            pos.current = wrap(target, N);
+            vel.current = 0;
+            snapTarget.current = null;
+          }
+        } else if (autoplayActive.current && !isPaused.current && !reduced) {
           // Autoplay with smoothstep ease-in ramp
           const elapsed = time - autoplayResumeAt.current;
           const ramp = Math.min(elapsed / AUTOPLAY_RAMP_MS, 1);
           const easedRamp = ramp * ramp * (3 - 2 * ramp); // smoothstep
           pos.current += AUTOPLAY_SPEED * easedRamp * dt;
         } else if (Math.abs(vel.current) > VEL_DEADZONE && !reduced) {
-          // Momentum: time-based exponential decay
+          // Momentum: time-based exponential decay (drag flicks)
           pos.current += vel.current * dt;
           vel.current *= Math.exp(-dtMs / FRICTION_TAU);
           if (Math.abs(vel.current) < VEL_DEADZONE) vel.current = 0;
         } else {
-          // Snap: critically damped spring
+          // Snap: critically damped spring to nearest card
           const nearest = Math.round(pos.current);
           const delta = nearest - pos.current;
 
@@ -343,6 +365,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     (e: React.PointerEvent) => {
       isDragging.current = true;
       autoplayActive.current = false;
+      snapTarget.current = null; // cancel any in-progress dot-click navigation
       vel.current = 0;
       dragStartX.current = e.clientX;
       dragStartPos.current = pos.current;
@@ -381,14 +404,11 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     []
   );
 
-  /* ─── Dot click: jump via shortest path ─── */
+  /* ─── Dot click: spring-drive to exact target ─── */
   const handleDotClick = useCallback((targetIdx: number) => {
     autoplayActive.current = false;
     vel.current = 0;
-    // Set velocity toward target via shortest path
-    const delta = shortestDelta(pos.current, targetIdx, N);
-    // Use a spring-like impulse
-    vel.current = delta * 3;
+    snapTarget.current = targetIdx;
   }, []);
 
   /* ─── Bail if nothing to show ─── */
