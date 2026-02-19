@@ -184,25 +184,20 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
 
       if (!isDragging.current) {
         if (snapTarget.current !== null) {
-          // Dot-click: spring-drive to exact target (skip momentum branch)
+          // Dot-click: fast exponential ease-out to exact target
           const target = snapTarget.current;
           const delta = shortestDelta(pos.current, target, N);
 
-          if (reduced) {
+          if (reduced || Math.abs(delta) <= SNAP_POS_EPS) {
             pos.current = wrap(target, N);
             vel.current = 0;
             snapTarget.current = null;
-          } else if (Math.abs(delta) > SNAP_POS_EPS || Math.abs(vel.current) > SNAP_VEL_EPS) {
-            // Stiffer spring for dot-click traversals (1-2 cards)
-            const k = SNAP_K * 2.5;
-            const c = SNAP_C * 1.5;
-            const accel = delta * k - vel.current * c;
-            vel.current += accel * dtMs;
-            pos.current += vel.current * dt;
           } else {
-            pos.current = wrap(target, N);
-            vel.current = 0;
-            snapTarget.current = null;
+            // Exponential lerp: close 20% of remaining distance each frame
+            // at 60fps this reaches the target in ~200-250ms (fast & smooth)
+            const lerpFactor = 1 - Math.exp(-dtMs / 60);
+            pos.current = wrap(pos.current + delta * lerpFactor, N);
+            vel.current = 0; // no momentum during dot navigation
           }
         } else if (autoplayActive.current && !isPaused.current && !reduced) {
           // Autoplay with smoothstep ease-in ramp
@@ -238,12 +233,17 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       // Wrap position
       pos.current = wrap(pos.current, N);
 
-      // Spring-animate dot position (smoother lag)
-      const dotDelta = shortestDelta(dotPos.current, pos.current, N);
-      if (Math.abs(dotDelta) > SNAP_POS_EPS) {
-        dotPos.current = wrap(dotPos.current + dotDelta * DOT_SPRING, N);
-      } else {
+      // Dot position: snap immediately during dot-click (user declared intent),
+      // otherwise spring-animate for a smooth lag during autoplay/drag.
+      if (snapTarget.current !== null) {
         dotPos.current = pos.current;
+      } else {
+        const dotDelta = shortestDelta(dotPos.current, pos.current, N);
+        if (Math.abs(dotDelta) > SNAP_POS_EPS) {
+          dotPos.current = wrap(dotPos.current + dotDelta * DOT_SPRING, N);
+        } else {
+          dotPos.current = pos.current;
+        }
       }
 
       // Update DOM directly (no React re-render)
