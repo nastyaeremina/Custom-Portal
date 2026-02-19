@@ -72,6 +72,99 @@ const USER_AGENTS = [
   "Mozilla/5.0 (compatible; BrandScraper/1.0)",
 ];
 
+// ─── Third-party tracking / analytics domains to block ──────────────────────
+// These fire dozens of network requests that delay `networkidle2` but
+// contribute zero CSS or DOM content our extractors need.
+// Only *script* resource-type requests to these domains are blocked;
+// first-party scripts and all stylesheets/images pass through untouched.
+const BLOCKED_THIRD_PARTY_DOMAINS = [
+  // Analytics
+  "google-analytics.com",
+  "googletagmanager.com",
+  "analytics.google.com",
+  "ga.js",
+  "gtag",
+  // Advertising / remarketing
+  "googlesyndication.com",
+  "googleadservices.com",
+  "doubleclick.net",
+  "adservice.google.com",
+  "facebook.net",
+  "connect.facebook.net",
+  "fbevents.js",
+  "ads-twitter.com",
+  "ads.linkedin.com",
+  "snap.licdn.com",
+  // Chat widgets
+  "intercom.io",
+  "intercomcdn.com",
+  "drift.com",
+  "crisp.chat",
+  "livechatinc.com",
+  "tawk.to",
+  "zendesk.com",
+  "zdassets.com",
+  "freshdesk.com",
+  "olark.com",
+  // Marketing / tracking
+  "hotjar.com",
+  "fullstory.com",
+  "mouseflow.com",
+  "crazyegg.com",
+  "optimizely.com",
+  "segment.io",
+  "segment.com",
+  "mixpanel.com",
+  "amplitude.com",
+  "heapanalytics.com",
+  "hubspot.com",
+  "hs-scripts.com",
+  "hs-analytics.net",
+  "hsforms.com",
+  "marketo.net",
+  "marketo.com",
+  "pardot.com",
+  "munchkin.marketo.net",
+  "clarity.ms",
+  "sentry.io",
+  "sentry-cdn.com",
+  "newrelic.com",
+  "nr-data.net",
+  "datadoghq.com",
+  "browser-intake-datadoghq.com",
+  // A/B testing
+  "abtasty.com",
+  "vwo.com",
+  // Consent / cookie banners (they add network requests, not brand content)
+  "cookiebot.com",
+  "onetrust.com",
+  "cookielaw.org",
+  "consent.cookiebot.com",
+  // Social embeds / share widgets
+  "platform.twitter.com",
+  "platform.linkedin.com",
+  "widgets.outbrain.com",
+  "cdn.taboola.com",
+  // CDN-based trackers
+  "cdn.jsdelivr.net/npm/@clickup",
+  "js.hs-banner.com",
+  "bat.bing.com",
+  "px.ads.linkedin.com",
+  "sc-static.net",
+];
+
+/** Fast check: does a URL belong to a blocked third-party domain? */
+function isBlockedThirdParty(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname;
+    return BLOCKED_THIRD_PARTY_DOMAINS.some(
+      (d) => hostname === d || hostname.endsWith("." + d)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Set up a fresh page with request interception and the given user agent. */
 async function setupPage(browser: Browser, ua: string): Promise<Page> {
   const page = await browser.newPage();
@@ -93,11 +186,23 @@ async function setupPage(browser: Browser, ua: string): Promise<Page> {
   await page.setRequestInterception(true);
   page.on("request", (req) => {
     const resourceType = req.resourceType();
+
+    // Always block media, fonts, websockets — never needed
     if (["media", "font", "websocket"].includes(resourceType)) {
       req.abort();
-    } else {
-      req.continue();
+      return;
     }
+
+    // Block third-party tracking/analytics scripts — they fire dozens of
+    // network requests that delay networkidle2 but contribute no brand
+    // CSS or DOM content our extractors use.
+    // Only block "script" type so first-party JS and all stylesheets pass.
+    if (resourceType === "script" && isBlockedThirdParty(req.url())) {
+      req.abort();
+      return;
+    }
+
+    req.continue();
   });
 
   return page;
@@ -107,8 +212,11 @@ async function setupPage(browser: Browser, ua: string): Promise<Page> {
  * Wait for most visible images to finish loading.
  * Framer, React, and Next.js sites often render images asynchronously
  * after the initial `networkidle2` fires.  This polls `img.complete`
- * for up to 3 seconds so `naturalWidth`/`naturalHeight` are populated
+ * for up to 2 seconds so `naturalWidth`/`naturalHeight` are populated
  * when `extractHeroImages` runs.
+ *
+ * Reduced from 3s → 2s: logos and above-fold images load quickly;
+ * the remaining 20% are usually off-screen lazy images we don't need.
  */
 async function waitForImages(page: Page): Promise<void> {
   try {
@@ -122,7 +230,7 @@ async function waitForImages(page: Page): Promise<void> {
         // Pass when ≥80% of images are done (avoids stalling on broken imgs)
         return loaded / imgs.length >= 0.8;
       },
-      { timeout: 3000 }
+      { timeout: 2000 }
     );
   } catch {
     // Timeout is fine — we tried our best; proceed with whatever loaded
@@ -135,10 +243,30 @@ export async function createPage(browser: Browser, url: string): Promise<Page> {
     const ua = USER_AGENTS[i];
     const page = await setupPage(browser, ua);
 
-    const response = await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: 30000,
-    });
+    // Use networkidle2 with a tighter timeout.  Third-party tracking
+    // scripts are now blocked, so the network should settle much faster.
+    // If it still takes >20s the page is likely very heavy with
+    // remaining scripts — our extractors work fine with partial loads.
+    let response;
+    try {
+      response = await page.goto(url, {
+        waitUntil: "networkidle2",
+        timeout: 20000,
+      });
+    } catch (navError: unknown) {
+      // Navigation timeout — fall back to whatever state the page is in.
+      // The DOM and stylesheets are almost certainly loaded by 20s;
+      // the timeout usually means a few long-poll / streaming requests
+      // are still open.
+      const isTimeout = navError instanceof Error && navError.message.includes("timeout");
+      if (isTimeout) {
+        console.warn(`[scraper] networkidle2 timed out for ${url}, proceeding with current page state`);
+        await waitForImages(page);
+        return page;
+      }
+      // Non-timeout navigation errors (DNS failure, etc.) — rethrow
+      throw navError;
+    }
 
     const status = response?.status() ?? 0;
 
@@ -169,6 +297,6 @@ export async function createPage(browser: Browser, url: string): Promise<Page> {
 
   // Shouldn't be reached, but TypeScript needs a return
   const page = await setupPage(browser, USER_AGENTS[0]);
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
   return page;
 }
