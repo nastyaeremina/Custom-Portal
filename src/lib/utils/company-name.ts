@@ -44,6 +44,7 @@ const SOURCE_TRUST: Record<CompanyNameSource, number> = {
   manifest: 80,
   "header-brand": 70,
   "logo-alt": 65,
+  domain: 50,
   "og:title": 40,
   title: 30,
   segment: 0, // computed dynamically from parent

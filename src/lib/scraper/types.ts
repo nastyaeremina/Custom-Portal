@@ -20,6 +20,7 @@ export type CompanyNameSource =
   | "title"
   | "logo-alt"
   | "header-brand"
+  | "domain"
   | "segment";
 
 export interface CompanyNameCandidate {

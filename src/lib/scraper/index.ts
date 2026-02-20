@@ -13,6 +13,7 @@ import {
   detectParkedDomain,
 } from "./extractors";
 import { CompanyNameCandidate, ScrapedData } from "./types";
+import { nameFromDomain } from "@/lib/utils/domain-name-splitter";
 
 export async function scrapeWebsite(url: string): Promise<ScrapedData> {
   const browser = await getBrowser();
@@ -54,6 +55,14 @@ export async function scrapeWebsite(url: string): Promise<ScrapedData> {
     }
     if (manifestData.shortName && manifestData.shortName !== manifestData.name) {
       companyNameCandidates.push({ value: manifestData.shortName, source: "manifest" });
+    }
+
+    // ── Derive a candidate from the domain name ──
+    // Helps when structured data (og:site_name, schema-org) is missing and the
+    // page title is purely descriptive/SEO-focused (e.g. "Tulum Real Estate…").
+    const domainName = nameFromDomain(url);
+    if (domainName) {
+      companyNameCandidates.push({ value: domainName, source: "domain" });
     }
 
     // Combine all images
