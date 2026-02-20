@@ -55,6 +55,8 @@ export interface BrandMarkAnalysis {
   uniqueColorCount: number;
   isLikelyMonogram: boolean;
   monogramConfidence: number;
+  smoothRatio: number;
+  photoPenalty: number;
   scores: BrandMarkScores;
   totalScore: number;
   disqualified: boolean;
@@ -160,6 +162,102 @@ async function scoreComplexity(buffer: Buffer): Promise<{ score: number; uniqueC
     return { score, uniqueColors: n };
   } catch {
     return { score: 50, uniqueColors: -1 }; // Can't analyse → neutral
+  }
+}
+
+/**
+ * Photo detection — measures how "photographic" an image is.
+ *
+ * Icons/logos have flat color regions with hard edges: most neighboring
+ * pixel pairs have very low gradient (< 10 total RGB diff), and the
+ * number of unique quantised colors is moderate (< 100 at q16).
+ *
+ * Photos have continuous tonal variation: few flat regions, many unique
+ * colors, and a high average gradient.
+ *
+ * We combine two signals:
+ *   1. lowGradRatio — fraction of pixel-pairs with gradient < 10
+ *      (icons ~60-90%, photos ~5-15%)
+ *   2. uniqueColors at q16 quantisation
+ *      (icons ~20-80, photos ~120-250+)
+ *
+ * Returns a smoothRatio ∈ [0, 1] (higher = more photographic) and a
+ * multiplicative penalty factor for the total score.
+ */
+async function detectPhotoness(
+  buffer: Buffer
+): Promise<{ smoothRatio: number; penaltyFactor: number }> {
+  try {
+    const SIZE = 50;
+    const { data, info } = await sharp(buffer)
+      .resize(SIZE, SIZE, { fit: "cover" })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const ch = info.channels; // 3 (RGB)
+
+    // Count unique quantised colors (step 16)
+    const colorSet = new Set<string>();
+    const step = 16;
+    for (let i = 0; i < data.length; i += ch) {
+      const r = Math.round(data[i] / step) * step;
+      const g = Math.round(data[i + 1] / step) * step;
+      const b = Math.round(data[i + 2] / step) * step;
+      colorSet.add(`${r},${g},${b}`);
+    }
+    const uniqueColors = colorSet.size;
+
+    // Count low-gradient pixel pairs (flat regions)
+    let lowGradCount = 0;
+    let totalComparisons = 0;
+
+    for (let row = 0; row < SIZE; row++) {
+      for (let col = 0; col < SIZE; col++) {
+        const idx = (row * SIZE + col) * ch;
+
+        // Right neighbor
+        if (col < SIZE - 1) {
+          const rIdx = idx + ch;
+          const diff =
+            Math.abs(data[idx] - data[rIdx]) +
+            Math.abs(data[idx + 1] - data[rIdx + 1]) +
+            Math.abs(data[idx + 2] - data[rIdx + 2]);
+          if (diff < 10) lowGradCount++;
+          totalComparisons++;
+        }
+
+        // Bottom neighbor
+        if (row < SIZE - 1) {
+          const bIdx = ((row + 1) * SIZE + col) * ch;
+          const diff =
+            Math.abs(data[idx] - data[bIdx]) +
+            Math.abs(data[idx + 1] - data[bIdx + 1]) +
+            Math.abs(data[idx + 2] - data[bIdx + 2]);
+          if (diff < 10) lowGradCount++;
+          totalComparisons++;
+        }
+      }
+    }
+
+    const lowGradRatio = totalComparisons > 0 ? lowGradCount / totalComparisons : 1;
+
+    // Combine signals into a "photoness" score [0..1]
+    // Low flat regions + many colors = likely photo
+    // High flat regions + few colors = likely icon
+    const colorSignal = Math.min(1, Math.max(0, (uniqueColors - 80) / 120)); // 0 at ≤80, 1 at ≥200
+    const gradSignal = Math.min(1, Math.max(0, (0.40 - lowGradRatio) / 0.30)); // 0 at ≥40% flat, 1 at ≤10% flat
+    const smoothRatio = (colorSignal + gradSignal) / 2;
+
+    // Penalty thresholds
+    let penaltyFactor: number;
+    if (smoothRatio < 0.45) penaltyFactor = 1.0;     // icons — no penalty
+    else if (smoothRatio <= 0.65) penaltyFactor = 0.7; // ambiguous — mild penalty
+    else penaltyFactor = 0.35;                         // photographs — heavy penalty
+
+    return { smoothRatio: +smoothRatio.toFixed(3), penaltyFactor };
+  } catch {
+    return { smoothRatio: 0, penaltyFactor: 1.0 }; // Can't analyse → no penalty
   }
 }
 
@@ -355,6 +453,8 @@ async function evaluateCandidate(
           uniqueColorCount: 0,
           isLikelyMonogram: false,
           monogramConfidence: 0,
+          smoothRatio: 0,
+          photoPenalty: 1.0,
           scores: { aspect: 0, resolution: 0, complexity: 0, source: 0, monogram: 0 },
           totalScore: 0,
           disqualified: true,
@@ -381,6 +481,8 @@ async function evaluateCandidate(
           uniqueColorCount: 0,
           isLikelyMonogram: false,
           monogramConfidence: 0,
+          smoothRatio: 0,
+          photoPenalty: 1.0,
           scores: { aspect: 0, resolution: 0, complexity: 0, source: 0, monogram: 0 },
           totalScore: 0,
           disqualified: true,
@@ -390,9 +492,10 @@ async function evaluateCandidate(
     }
 
     // Run analysis in parallel
-    const [complexityResult, monogramResult] = await Promise.all([
+    const [complexityResult, monogramResult, photonessResult] = await Promise.all([
       scoreComplexity(buffer),
       detectMonogram(buffer),
+      detectPhotoness(buffer),
     ]);
 
     const aspectScore = scoreAspect(width, height);
@@ -410,13 +513,17 @@ async function evaluateCandidate(
       monogram: Math.round(monogramScore),
     };
 
-    const totalScore = Math.round(
+    // Base score from weighted dimensions
+    const baseScore =
       scores.aspect * W_ASPECT +
-        scores.resolution * W_RESOLUTION +
-        scores.complexity * W_COMPLEXITY +
-        scores.source * W_SOURCE +
-        scores.monogram * W_MONOGRAM
-    );
+      scores.resolution * W_RESOLUTION +
+      scores.complexity * W_COMPLEXITY +
+      scores.source * W_SOURCE +
+      scores.monogram * W_MONOGRAM;
+
+    // Apply photo-detection penalty: photographs get heavily penalized
+    // because they look wrong as small brand icons in sidebar/login.
+    const totalScore = Math.round(baseScore * photonessResult.penaltyFactor);
 
     return {
       ...candidate,
@@ -429,6 +536,8 @@ async function evaluateCandidate(
         uniqueColorCount: complexityResult.uniqueColors,
         isLikelyMonogram: monogramResult.isLikely,
         monogramConfidence: +monogramResult.confidence.toFixed(2),
+        smoothRatio: photonessResult.smoothRatio,
+        photoPenalty: photonessResult.penaltyFactor,
         scores,
         totalScore,
         disqualified: false,
@@ -445,6 +554,8 @@ async function evaluateCandidate(
         uniqueColorCount: 0,
         isLikelyMonogram: false,
         monogramConfidence: 0,
+        smoothRatio: 0,
+        photoPenalty: 1.0,
         scores: { aspect: 0, resolution: 0, complexity: 0, source: 0, monogram: 0 },
         totalScore: 0,
         disqualified: true,
@@ -492,6 +603,8 @@ export async function selectBestBrandMark(
             uniqueColorCount: 0,
             isLikelyMonogram: false,
             monogramConfidence: 0,
+            smoothRatio: 0,
+            photoPenalty: 1.0,
             scores: { aspect: 0, resolution: 0, complexity: 0, source: 0, monogram: 0 },
             totalScore: 0,
             disqualified: true,

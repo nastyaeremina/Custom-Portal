@@ -460,6 +460,50 @@ export async function extractLogo(page: Page): Promise<string | null> {
       }
     });
 
+    // Strategy 8: Viewport-position fallback — find SVGs (or images) in the
+    // top-left quadrant of the page regardless of DOM ancestry.
+    // Catches Wix "pinned elements", Squarespace floating logos, and other
+    // builders that place brand marks outside <header>/<nav>/<a>.
+    // Lower score (15) so it never overrides legitimate header-based finds.
+    const existingSrcs = new Set(candidates.map((c) => c.src));
+
+    document.querySelectorAll("svg").forEach((svg) => {
+      const svgEl = svg as SVGSVGElement;
+      const bbox = svgEl.getBoundingClientRect();
+
+      // Must be in top-left region where logos typically appear
+      if (bbox.top > 120 || bbox.left > 400) return;
+      // Must be logo-sized
+      if (bbox.width < 20 || bbox.width > 300) return;
+      if (bbox.height < 10 || bbox.height > 200) return;
+      // Must be visible
+      if (bbox.width === 0 || bbox.height === 0) return;
+
+      if (isInCustomerSection(svgEl)) return;
+
+      const dataUrl = svgToDataUrl(svgEl);
+      if (!dataUrl || existingSrcs.has(dataUrl)) return;
+
+      let score = 15;
+      if (bbox.top < 80) score += 3;
+      candidates.push({ src: dataUrl, score });
+    });
+
+    // Also check images in top-left that weren't caught by earlier strategies
+    document.querySelectorAll("img").forEach((img) => {
+      const imgEl = img as HTMLImageElement;
+      if (!imgEl.src || !isLogoSized(imgEl)) return;
+      if (existingSrcs.has(imgEl.src)) return;
+
+      const rect = imgEl.getBoundingClientRect();
+      if (rect.top > 120 || rect.left > 400) return;
+      if (isInCustomerSection(imgEl)) return;
+
+      let score = 14;
+      if (rect.top < 80) score += 3;
+      candidates.push({ src: imgEl.src, score });
+    });
+
     // Dedupe by src and sort by score
     const seen = new Set<string>();
     const deduped = candidates.filter((c) => {
