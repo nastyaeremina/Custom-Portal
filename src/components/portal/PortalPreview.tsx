@@ -550,7 +550,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
               key={s.id}
               onClick={() => handleDotClick(i)}
               aria-label={s.label}
-              className="flex items-center justify-center p-[19px] md:p-[16px] transition-none"
+              className="flex items-center justify-center px-[10px] py-[16px] md:px-[8px] md:py-[14px] transition-none"
             >
               <span
                 className="block w-[6px] h-[6px] rounded-full"
