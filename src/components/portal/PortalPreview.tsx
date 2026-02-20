@@ -433,7 +433,10 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
           height: `${displayH}px`,
           cursor: isDragging.current ? "grabbing" : "grab",
           touchAction: "pan-y",
-        }}
+          userSelect: "none",
+          WebkitUserDrag: "none",
+        } as React.CSSProperties}
+        onDragStart={(e) => e.preventDefault()}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -468,7 +471,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
                 {/* Content: only when payload ready AND images preloaded */}
                 {!isLoading && payload && imagesReady && (
                   <div
-                    className="pointer-events-auto"
+                    className="pointer-events-none"
                     style={{
                       width: `${cfg.innerW}px`,
                       height: `${cfg.innerH}px`,
