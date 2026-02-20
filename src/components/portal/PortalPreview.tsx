@@ -56,7 +56,6 @@ const N = SCREENS.length;
 const CARD_W = 660;
 const CARD_H = 525;
 const CARD_GAP = 25;
-const SPACING = CARD_W + CARD_GAP; // center-to-center distance
 
 // ── Motion tuning ──
 const AUTOPLAY_SPEED    = 0.18;     // cards/sec (slower, more premium)
@@ -72,7 +71,8 @@ const SNAP_C            = 0.12;     // damping coefficient
 const SNAP_POS_EPS      = 0.002;    // position "close enough"
 const SNAP_VEL_EPS      = 0.0003;   // velocity "close enough"
 
-const RESUME_DELAY      = 1500;     // ms before autoplay resumes after mouse leave
+const INACTIVITY_DELAY  = 5000;     // ms before autoplay resumes after user interaction
+const CLICK_THRESHOLD   = 5;        // px — movement below this counts as click, not drag
 const DOT_SPRING        = 0.08;     // dot indicator stiffness (smoother lag)
 
 
@@ -101,15 +101,15 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
   const dotsRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
 
-  const isPaused = useRef(false); // hover pause
   const isDragging = useRef(false);
   const dragStartX = useRef(0);
+  const dragStartY = useRef(0);
   const dragStartPos = useRef(0);
-  const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoplayActive = useRef(false);
   const autoplayResumeAt = useRef(0); // timestamp when autoplay resumed (for ease-in)
   const prefersReducedMotion = useRef(false);
-  const snapTarget = useRef<number | null>(null); // explicit target card for dot-click navigation
+  const snapTarget = useRef<number | null>(null); // explicit target card for dot/click navigation
 
   /* ─── Responsive card scaling ─── */
   const vw = useViewportWidth();
@@ -172,6 +172,18 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
     };
   }, [payload, isLoading]);
 
+  /* ─── Schedule autoplay resume after user interaction ─── */
+  const scheduleAutoplayResume = useCallback(() => {
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    inactivityTimer.current = setTimeout(() => {
+      if (!isDragging.current && snapTarget.current === null) {
+        autoplayActive.current = true;
+        autoplayResumeAt.current = performance.now();
+        vel.current = 0;
+      }
+    }, INACTIVITY_DELAY);
+  }, []);
+
   /* ─── Core animation loop ─── */
   const tick = useCallback(
     (time: number) => {
@@ -184,7 +196,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
 
       if (!isDragging.current) {
         if (snapTarget.current !== null) {
-          // Dot-click: fast exponential ease-out to exact target
+          // Dot/card click: fast exponential ease-out to exact target
           const target = snapTarget.current;
           const delta = shortestDelta(pos.current, target, N);
 
@@ -197,10 +209,10 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
             // at 60fps this reaches the target in ~200-250ms (fast & smooth)
             const lerpFactor = 1 - Math.exp(-dtMs / 60);
             pos.current = wrap(pos.current + delta * lerpFactor, N);
-            vel.current = 0; // no momentum during dot navigation
+            vel.current = 0; // no momentum during snap navigation
           }
-        } else if (autoplayActive.current && !isPaused.current && !reduced) {
-          // Autoplay with smoothstep ease-in ramp
+        } else if (autoplayActive.current && !reduced) {
+          // Autoplay with smoothstep ease-in ramp (no hover-pause check)
           const elapsed = time - autoplayResumeAt.current;
           const ramp = Math.min(elapsed / AUTOPLAY_RAMP_MS, 1);
           const easedRamp = ramp * ramp * (3 - 2 * ramp); // smoothstep
@@ -233,7 +245,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       // Wrap position
       pos.current = wrap(pos.current, N);
 
-      // Dot position: snap immediately during dot-click (user declared intent),
+      // Dot position: snap immediately during snap navigation (user declared intent),
       // otherwise spring-animate for a smooth lag during autoplay/drag.
       if (snapTarget.current !== null) {
         dotPos.current = pos.current;
@@ -283,15 +295,14 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       card.style.opacity = String(opacity);
     }
 
-    // Update dot indicator
+    // Update dot indicator — color the inner <span> inside each button
     if (dots) {
       const activeIdx = Math.round(wrap(dotPos.current, N)) % N;
       for (let i = 0; i < dots.children.length; i++) {
-        const dot = dots.children[i] as HTMLElement;
-        if (i === activeIdx) {
-          dot.style.backgroundColor = "#262626"; // neutral-800
-        } else {
-          dot.style.backgroundColor = "#d4d4d4"; // neutral-300
+        const btn = dots.children[i] as HTMLElement;
+        const span = btn.firstElementChild as HTMLElement | null;
+        if (span) {
+          span.style.backgroundColor = i === activeIdx ? "#262626" : "#d4d4d4";
         }
       }
     }
@@ -332,42 +343,20 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       autoplayActive.current = false;
     }
     return () => {
-      if (resumeTimer.current) clearTimeout(resumeTimer.current);
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     };
   }, [payload, isLoading, imagesReady]);
-
-  /* ─── Hover: pause / resume ─── */
-  const handleMouseEnter = useCallback(() => {
-    isPaused.current = true;
-    if (resumeTimer.current) {
-      clearTimeout(resumeTimer.current);
-      resumeTimer.current = null;
-    }
-  }, []);
-
-  const handleMouseLeave = useCallback(() => {
-    isPaused.current = false;
-    if (!isDragging.current && autoplayActive.current) return; // already playing
-    // If we were dragging or paused, resume autoplay after delay
-    if (payload) {
-      resumeTimer.current = setTimeout(() => {
-        if (!isPaused.current) {
-          autoplayActive.current = true;
-          autoplayResumeAt.current = performance.now();
-          vel.current = 0;
-        }
-      }, RESUME_DELAY);
-    }
-  }, [payload]);
 
   /* ─── Drag handlers ─── */
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       isDragging.current = true;
       autoplayActive.current = false;
-      snapTarget.current = null; // cancel any in-progress dot-click navigation
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+      snapTarget.current = null; // cancel any in-progress snap navigation
       vel.current = 0;
       dragStartX.current = e.clientX;
+      dragStartY.current = e.clientY;
       dragStartPos.current = pos.current;
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
@@ -390,26 +379,71 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
       if (!isDragging.current) return;
       isDragging.current = false;
 
+      const dx = e.clientX - dragStartX.current;
+      const dy = e.clientY - dragStartY.current;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      // Click detection: if pointer barely moved, treat as card click
+      if (distance < CLICK_THRESHOLD) {
+        // Determine which card was clicked based on click position
+        const viewport = viewportRef.current;
+        if (viewport) {
+          const viewportW = viewport.offsetWidth;
+          const dw = displayWRef.current;
+          const ds = displaySpacingRef.current;
+          const centerX = viewportW / 2 - dw / 2;
+          const clickX = e.clientX;
+
+          // Find the card closest to the click position
+          let bestIdx = Math.round(pos.current) % N;
+          let bestDist = Infinity;
+
+          for (let i = 0; i < N; i++) {
+            const d = shortestDelta(pos.current, i, N);
+            const cardLeft = centerX + d * ds;
+            const cardRight = cardLeft + dw;
+            // Distance from click to card center
+            const cardCenter = (cardLeft + cardRight) / 2;
+            const dist = Math.abs(clickX - cardCenter);
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestIdx = i;
+            }
+          }
+
+          // Snap to the clicked card
+          autoplayActive.current = false;
+          vel.current = 0;
+          snapTarget.current = bestIdx;
+          scheduleAutoplayResume();
+          return;
+        }
+      }
+
+      // It was a drag — apply momentum
       if (prefersReducedMotion.current) {
         // Snap instantly, no momentum
         vel.current = 0;
         pos.current = Math.round(pos.current);
+        scheduleAutoplayResume();
         return;
       }
 
-      const dx = e.clientX - dragStartX.current;
       vel.current = (-dx / displaySpacingRef.current) * 2;
       vel.current = Math.max(-MAX_FLICK_VEL, Math.min(MAX_FLICK_VEL, vel.current));
+      scheduleAutoplayResume();
     },
-    []
+    [scheduleAutoplayResume]
   );
 
-  /* ─── Dot click: spring-drive to exact target ─── */
+  /* ─── Dot click: snap to exact target ─── */
   const handleDotClick = useCallback((targetIdx: number) => {
     autoplayActive.current = false;
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     vel.current = 0;
     snapTarget.current = targetIdx;
-  }, []);
+    scheduleAutoplayResume();
+  }, [scheduleAutoplayResume]);
 
   /* ─── Bail if nothing to show ─── */
   if (!isLoading && !payload) {
@@ -418,11 +452,7 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
 
   /* ─── Render ─── */
   return (
-    <div
-      className="w-full flex flex-col"
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
-    >
+    <div className="w-full flex flex-col">
       {/* Carousel viewport — full-width breakout, responsive height */}
       <div
         ref={viewportRef}
@@ -512,17 +542,21 @@ export function PortalPreview({ payload, isLoading }: PortalPreviewProps) {
         </div>
       </div>
 
-      {/* Dot indicators — spring-animated */}
-      <div className="flex justify-center pb-4 pt-[32px]">
-        <div ref={dotsRef} className="flex items-center gap-[10px]">
+      {/* Dot indicators — enlarged touch targets with small visual dots */}
+      <div className="flex justify-center pb-4 pt-[24px] md:pt-[32px]">
+        <div ref={dotsRef} className="flex items-center gap-0">
           {SCREENS.map((s, i) => (
             <button
               key={s.id}
               onClick={() => handleDotClick(i)}
               aria-label={s.label}
-              className="w-[6px] h-[6px] rounded-full transition-none"
-              style={{ backgroundColor: i === 0 ? "#262626" : "#d4d4d4" }}
-            />
+              className="flex items-center justify-center p-[19px] md:p-[16px] transition-none"
+            >
+              <span
+                className="block w-[6px] h-[6px] rounded-full"
+                style={{ backgroundColor: i === 0 ? "#262626" : "#d4d4d4" }}
+              />
+            </button>
           ))}
         </div>
       </div>
