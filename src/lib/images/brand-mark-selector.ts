@@ -22,6 +22,42 @@ const RESIZE_THRESHOLD = 128; // above this we resize to RESIZE_TARGET
 const MINIMUM_VIABLE_SCORE = 35; // below this → fall back to initials
 const FAVICON_PREFERENCE_BUFFER = 15; // favicon wins ties within this margin
 
+// ─── Platform-default favicon patterns ──────────────────────────────────
+// Generic favicons shipped by site-builders / CMS platforms.  These are
+// *not* brand-specific and should be disqualified so the pipeline falls
+// back to a real logo or initials.
+// Each entry is a regex tested against the full favicon URL.
+const PLATFORM_DEFAULT_FAVICONS: RegExp[] = [
+  // Webflow — generic webclip shipped with every new project
+  /\/img\/webclip\.png$/i,
+  // WordPress — default "W" logo
+  /wp-includes\/images\/w-logo/i,
+  /wp-content\/themes\/flavor\/favicon/i,
+  // Wix — generic default favicons
+  /fav-icon\.ico$/i,
+  /wixstatic\.com\/.*\/favicon\.ico$/i,
+  // Squarespace — default favicon
+  /static1\.squarespace\.com\/static\/.*\/favicon\.ico$/i,
+  // Shopify — generic default icons
+  /cdn\.shopify\.com\/s\/files\/.*\/favicon/i,
+  // GoDaddy Website Builder
+  /img\.websitebuilder\.com\/.*favicon/i,
+  // Weebly
+  /weebly\.com\/.*\/favicon/i,
+  // Google Sites
+  /sites\.google\.com\/.*\/favicon/i,
+];
+
+/** Check if a favicon URL matches a known platform-default pattern. */
+function isPlatformDefaultFavicon(url: string): string | null {
+  for (const pattern of PLATFORM_DEFAULT_FAVICONS) {
+    if (pattern.test(url)) {
+      return pattern.source;
+    }
+  }
+  return null;
+}
+
 // ─── Score weights (must sum to 1.0) ────────────────────────────────────
 
 const W_ASPECT = 0.25;
@@ -438,6 +474,32 @@ async function evaluateCandidate(
   candidate: BrandMarkCandidate
 ): Promise<EvaluatedCandidate> {
   try {
+    // ── Platform-default favicon check ──────────────────────────────
+    // Disqualify generic builder favicons before even fetching pixels.
+    if (candidate.source === "favicon") {
+      const matchedPattern = isPlatformDefaultFavicon(candidate.url);
+      if (matchedPattern) {
+        return {
+          ...candidate,
+          analysis: {
+            width: 0,
+            height: 0,
+            aspectRatio: 0,
+            resolution: 0,
+            uniqueColorCount: 0,
+            isLikelyMonogram: false,
+            monogramConfidence: 0,
+            smoothRatio: 0,
+            photoPenalty: 1.0,
+            scores: { aspect: 0, resolution: 0, complexity: 0, source: 0, monogram: 0 },
+            totalScore: 0,
+            disqualified: true,
+            disqualifyReason: `Platform default favicon (matched: ${matchedPattern})`,
+          },
+        };
+      }
+    }
+
     let buffer = await fetchWithTimeout(candidate.url, FETCH_TIMEOUT);
 
     // Handle ICO files
