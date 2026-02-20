@@ -51,6 +51,36 @@ interface StreamEvent {
   error?: string;
 }
 
+/** Convert raw technical error messages into user-friendly text. */
+function humanizeError(raw: string): string {
+  // DNS / domain not found
+  if (raw.includes("ERR_NAME_NOT_RESOLVED"))
+    return "We couldn't find that website. Please check the URL and try again.";
+  // Connection refused
+  if (raw.includes("ERR_CONNECTION_REFUSED"))
+    return "This website refused the connection. It may be down or blocking automated access.";
+  // SSL / certificate errors
+  if (raw.includes("ERR_CERT"))
+    return "This website has a security certificate issue. We couldn't connect safely.";
+  // Timeout (Puppeteer navigation or networkidle)
+  if (/timeout/i.test(raw))
+    return "This website took too long to respond. Please try again.";
+  // Network down
+  if (raw.includes("ERR_INTERNET_DISCONNECTED") || raw.includes("ERR_NETWORK"))
+    return "It looks like you're offline. Please check your connection and try again.";
+  // HTTP 4xx / 5xx from our own API
+  if (/^HTTP error: [45]\d\d$/.test(raw))
+    return "Something went wrong on our end. Please try again.";
+  // Empty response body (edge case)
+  if (raw === "No response body")
+    return "We couldn't get a response. Please try again.";
+  // Generic unknown
+  if (raw === "Unknown error occurred" || raw === "Unknown error")
+    return "Something went wrong. Please try again.";
+  // Catch-all fallback
+  return "Something went wrong while generating your preview. Please try again.";
+}
+
 export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -215,7 +245,7 @@ export default function Home() {
         if (done) break;
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(humanizeError(err instanceof Error ? err.message : ""));
       setPortalData(null);
       setRawOutputs(null);
     } finally {
