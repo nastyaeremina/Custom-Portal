@@ -90,22 +90,22 @@ export function UrlInputForm({
           }}
         />
 
-        {/* Generate button — embedded in the pill */}
-        <button
-          type="submit"
-          disabled={isLoading}
-          className={cn(
-            "flex items-center justify-center",
-            "px-[var(--space-24)] py-[var(--space-8)]",
-            "text-[var(--font-size-caption)] font-medium text-white",
-            "rounded-[var(--radius-full)]",
-            "transition-all hover:opacity-90",
-            "disabled:opacity-50 disabled:cursor-not-allowed",
-            "whitespace-nowrap shrink-0"
-          )}
-          style={{ backgroundColor: "var(--base-off-black)" }}
-        >
-          {isLoading ? (
+        {/* Action button — "Generate" (submit) or "Complete setup" (link to dashboard) */}
+        {isLoading ? (
+          <button
+            type="submit"
+            disabled
+            className={cn(
+              "flex items-center justify-center",
+              "px-[var(--space-24)] py-[var(--space-8)]",
+              "text-[var(--font-size-caption)] font-medium text-white",
+              "rounded-[var(--radius-full)]",
+              "transition-all",
+              "disabled:opacity-50 disabled:cursor-not-allowed",
+              "whitespace-nowrap shrink-0"
+            )}
+            style={{ backgroundColor: "var(--base-off-black)" }}
+          >
             <div className="flex items-center gap-2">
               <svg
                 className="animate-spin h-4 w-4"
@@ -129,12 +129,40 @@ export function UrlInputForm({
               </svg>
               Loading...
             </div>
-          ) : hasResult ? (
-            "Generate again"
-          ) : (
-            "Generate"
-          )}
-        </button>
+          </button>
+        ) : hasResult ? (
+          <a
+            href="https://dashboard.assembly.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(
+              "flex items-center justify-center",
+              "px-[var(--space-24)] py-[var(--space-8)]",
+              "text-[var(--font-size-caption)] font-medium text-white",
+              "rounded-[var(--radius-full)]",
+              "transition-all hover:opacity-90",
+              "whitespace-nowrap shrink-0"
+            )}
+            style={{ backgroundColor: "var(--base-off-black)" }}
+          >
+            Complete setup
+          </a>
+        ) : (
+          <button
+            type="submit"
+            className={cn(
+              "flex items-center justify-center",
+              "px-[var(--space-24)] py-[var(--space-8)]",
+              "text-[var(--font-size-caption)] font-medium text-white",
+              "rounded-[var(--radius-full)]",
+              "transition-all hover:opacity-90",
+              "whitespace-nowrap shrink-0"
+            )}
+            style={{ backgroundColor: "var(--base-off-black)" }}
+          >
+            Generate
+          </button>
+        )}
       </form>
 
       {/* Error message below the bar */}
