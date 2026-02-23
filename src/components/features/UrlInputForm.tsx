@@ -12,6 +12,8 @@ interface UrlInputFormProps {
   apiError?: string | null;
   /** Called when the user edits the input so the parent can clear its error state. */
   onClearError?: () => void;
+  /** Called when the user edits the input after a generation, so the parent can switch back to "Generate". */
+  onInputDirty?: () => void;
 }
 
 /**
@@ -28,6 +30,7 @@ export function UrlInputForm({
   hasResult,
   apiError,
   onClearError,
+  onInputDirty,
 }: UrlInputFormProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
@@ -73,6 +76,7 @@ export function UrlInputForm({
             setInput(e.target.value);
             setError("");
             onClearError?.();
+            onInputDirty?.();
           }}
           placeholder="Enter email or website"
           disabled={isLoading}

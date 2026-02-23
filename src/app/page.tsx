@@ -87,6 +87,7 @@ export default function Home() {
   const [portalData, setPortalData] = useState<PortalData | null>(null);
   const [rawOutputs, setRawOutputs] = useState<RawOutputs | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [inputDirty, setInputDirty] = useState(false);
 
   /* ─── Fluid scaling for desktop static hero card ─── */
   const [containerW, setContainerW] = useState(STATIC_CARD_MAX_W);
@@ -131,6 +132,7 @@ export default function Home() {
     setError(null);
     setPortalData(null);
     setRawOutputs(null);
+    setInputDirty(false);
     setStatusMessage("Starting...");
 
     try {
@@ -296,9 +298,10 @@ export default function Home() {
           <UrlInputForm
             onSubmit={handleSubmit}
             isLoading={isLoading}
-            hasResult={!!portalData}
+            hasResult={!!portalData && !inputDirty}
             apiError={error}
             onClearError={() => setError(null)}
+            onInputDirty={() => setInputDirty(true)}
           />
         </div>
 
