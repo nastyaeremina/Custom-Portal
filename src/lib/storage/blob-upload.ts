@@ -21,16 +21,20 @@ export async function uploadDataUrl(
   }
 
   try {
-    // Parse the data URL: data:[<mediatype>][;base64],<data>
-    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (!match) {
+    // Parse the data URL: data:[<mediatype>][;base64],<data>  OR  data:[<mediatype>],<data>
+    const base64Match = dataUrl.match(/^data:([^;,]+);base64,(.+)$/);
+    const plainMatch = !base64Match ? dataUrl.match(/^data:([^;,]+),(.+)$/) : null;
+
+    if (!base64Match && !plainMatch) {
       console.warn(`[blob-upload] Could not parse data URL for ${pathname}`);
       return dataUrl;
     }
 
-    const contentType = match[1];
-    const base64Data = match[2];
-    const buffer = Buffer.from(base64Data, "base64");
+    const contentType = (base64Match ?? plainMatch)![1];
+    const rawData = (base64Match ?? plainMatch)![2];
+    const buffer = base64Match
+      ? Buffer.from(rawData, "base64")
+      : Buffer.from(decodeURIComponent(rawData), "utf-8");
 
     const blob = await put(pathname, buffer, {
       access: "public",
