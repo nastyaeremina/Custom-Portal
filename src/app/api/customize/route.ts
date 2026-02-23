@@ -28,6 +28,7 @@ import {
 import { detectDiscipline, selectHeroImage, pickGenericImage } from "@/lib/discipline";
 import { scorePaletteDiversity } from "@/lib/images/palette-scorer";
 import { generateWelcomeMessage } from "@/lib/welcome-message";
+import { uploadPortalImages } from "@/lib/storage/blob-upload";
 
 export const maxDuration = 60;
 
@@ -454,6 +455,14 @@ export async function POST(request: NextRequest) {
       rawFaviconUrl: scrapedData.favicon,
       rawLogoUrl: scrapedData.logo,
     };
+
+    // ── 14. Upload images to Vercel Blob (data URLs → public URLs) ──
+    try {
+      images = await uploadPortalImages(images, domain);
+    } catch (e) {
+      console.error("[customize] blob upload failed, returning data URLs:", e);
+      // images stays as data URLs — still usable, just larger
+    }
 
     const finalData: PortalData = {
       companyName,
