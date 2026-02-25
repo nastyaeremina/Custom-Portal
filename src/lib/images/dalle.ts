@@ -955,6 +955,71 @@ export async function generateGradientImagePublic(
 }
 
 /**
+ * Composite a logo centered onto a gradient background image.
+ * Used by /api/customize to return a single ready-to-use login hero
+ * instead of separate gradient + logo that the client would need to overlay.
+ *
+ * Logo is sized to ~50% of the canvas (580px inside 1160px) and centered,
+ * matching the existing `generateLogoCenteredImage` proportions.
+ */
+export async function compositeLogoOnGradient(
+  gradientDataUrl: string,
+  logoUrl: string | null
+): Promise<string> {
+  const gradientBuffer = await fetchImageBuffer(gradientDataUrl);
+  if (!gradientBuffer) return gradientDataUrl;
+
+  if (!logoUrl) return gradientDataUrl;
+
+  const logoBuffer = await fetchImageBuffer(logoUrl);
+  if (!logoBuffer) return gradientDataUrl;
+
+  try {
+    const gradientMeta = await sharp(gradientBuffer).metadata();
+    const canvasW = gradientMeta.width || 1160;
+    const canvasH = gradientMeta.height || 1160;
+    const targetSize = Math.round(Math.min(canvasW, canvasH) * 0.5);
+
+    const resizedLogo = await sharp(logoBuffer)
+      .resize(targetSize, targetSize, { fit: "inside", withoutEnlargement: false })
+      .png()
+      .toBuffer();
+
+    const logoMeta = await sharp(resizedLogo).metadata();
+    const logoW = logoMeta.width || targetSize;
+    const logoH = logoMeta.height || targetSize;
+
+    const left = Math.round((canvasW - logoW) / 2);
+    const top = Math.round((canvasH - logoH) / 2);
+
+    // Add a subtle white glow behind the logo for contrast on dark gradients
+    const glowRadius = Math.round(targetSize * 0.7);
+    const glowSvg = Buffer.from(`<svg width="${canvasW}" height="${canvasH}">
+      <defs>
+        <radialGradient id="g" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="white" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="white" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <ellipse cx="${canvasW / 2}" cy="${canvasH / 2}" rx="${glowRadius}" ry="${glowRadius}" fill="url(#g)"/>
+    </svg>`);
+
+    const result = await sharp(gradientBuffer)
+      .composite([
+        { input: glowSvg, left: 0, top: 0 },
+        { input: resizedLogo, left, top },
+      ])
+      .png()
+      .toBuffer();
+
+    return `data:image/png;base64,${result.toString("base64")}`;
+  } catch (error) {
+    console.error("[compositeLogoOnGradient] failed:", error);
+    return gradientDataUrl;
+  }
+}
+
+/**
  * Compute gradient debug info without generating the image.
  * Pure & synchronous — used by the streaming route to get debug
  * metadata without running Sharp again.

@@ -24,6 +24,7 @@ import {
   LogoCenteredInput,
   extractColorsFromScrapedImages,
   computeGradientDebug,
+  compositeLogoOnGradient,
 } from "@/lib/images/dalle";
 import { detectDiscipline, selectHeroImage, pickGenericImage } from "@/lib/discipline";
 import { scorePaletteDiversity } from "@/lib/images/palette-scorer";
@@ -414,7 +415,14 @@ export async function POST(request: NextRequest) {
 
         if (gradientGen?.imageUrl) {
           if (!loginImage) {
+            // Composite logo centered on gradient → single ready-to-use hero
             loginGradientImage = gradientGen.imageUrl;
+            try {
+              const logoSource = fullLogo || scrapedData.logo || scrapedData.favicon;
+              loginImage = await compositeLogoOnGradient(gradientGen.imageUrl, logoSource);
+            } catch {
+              // Fallback: consumer gets gradient + logo separately
+            }
           }
           if (!dashboardImage) {
             dashboardImage = gradientGen.imageUrl;
