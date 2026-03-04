@@ -88,6 +88,7 @@ export default function Home() {
   const [rawOutputs, setRawOutputs] = useState<RawOutputs | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inputDirty, setInputDirty] = useState(false);
+  const [submittedInput, setSubmittedInput] = useState("");
 
   /* ─── Fluid scaling for desktop static hero card ─── */
   const [containerW, setContainerW] = useState(STATIC_CARD_MAX_W);
@@ -133,6 +134,7 @@ export default function Home() {
     setPortalData(null);
     setRawOutputs(null);
     setInputDirty(false);
+    setSubmittedInput(input);
     setStatusMessage("Starting...");
 
     try {
@@ -302,6 +304,7 @@ export default function Home() {
             apiError={error}
             onClearError={() => setError(null)}
             onInputDirty={() => setInputDirty(true)}
+            submittedInput={submittedInput}
           />
         </div>
 
@@ -349,7 +352,7 @@ export default function Home() {
       {/* ─── CTA Banner ─── */}
       <section className="px-4 md:px-[var(--space-40)] pb-[var(--space-64)]">
         <div className="max-w-[1360px] mx-auto">
-          <CTABanner />
+          <CTABanner email={submittedInput} />
         </div>
       </section>
 

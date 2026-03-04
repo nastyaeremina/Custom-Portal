@@ -14,6 +14,8 @@ interface UrlInputFormProps {
   onClearError?: () => void;
   /** Called when the user edits the input after a generation, so the parent can switch back to "Generate". */
   onInputDirty?: () => void;
+  /** The last submitted input value — used to pre-fill the email param in the "Complete setup" link. */
+  submittedInput?: string;
 }
 
 /**
@@ -31,6 +33,7 @@ export function UrlInputForm({
   apiError,
   onClearError,
   onInputDirty,
+  submittedInput,
 }: UrlInputFormProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
@@ -136,7 +139,7 @@ export function UrlInputForm({
           </button>
         ) : hasResult ? (
           <a
-            href="https://dashboard.assembly.com/"
+            href={`https://dashboard.assembly.com/${submittedInput ? `?email=${encodeURIComponent(submittedInput)}` : ""}`}
             target="_blank"
             rel="noopener noreferrer"
             className={cn(

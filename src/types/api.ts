@@ -47,6 +47,8 @@ export interface PortalData {
   images: PortalImages;
   /** Welcome message for the Messages view (discipline-tailored or default). */
   welcomeMessage: string;
+  /** The original input (email/domain) that was used to generate this data. */
+  inputEmail?: string;
 }
 
 export interface ColorWithUsage {

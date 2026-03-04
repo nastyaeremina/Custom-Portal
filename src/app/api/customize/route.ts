@@ -477,6 +477,7 @@ export async function POST(request: NextRequest) {
       colors,
       images,
       welcomeMessage,
+      inputEmail: input,
     };
 
     return ok(finalData);

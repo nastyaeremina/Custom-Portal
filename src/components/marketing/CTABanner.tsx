@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils/cn";
  * Padding: 64px all sides.
  * Inner gap: 24px between heading / subtitle / button.
  */
-export function CTABanner({ className }: { className?: string }) {
+export function CTABanner({ className, email }: { className?: string; email?: string }) {
   return (
     <section
       className={cn(
@@ -49,7 +49,7 @@ export function CTABanner({ className }: { className?: string }) {
           Try Assembly free for 14 days, no credit card required.
         </p>
         <a
-          href="https://dashboard.assembly.com/"
+          href={`https://dashboard.assembly.com/${email ? `?email=${encodeURIComponent(email)}` : ""}`}
           target="_blank"
           rel="noopener noreferrer"
           className="px-[var(--space-32)] py-[var(--space-12)] text-[var(--font-size-button)] font-semibold rounded-[var(--radius-full)] transition-all hover:opacity-90 inline-block"
